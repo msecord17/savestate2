@@ -105,20 +105,38 @@ export async function POST() {
 
       // B) If no release exists, create game + release
       if (!releaseId) {
-        const { data: newGame, error: gErr } = await supabaseAdmin
+        // 1) Try to find existing game by canonical_title
+        const { data: existingGame, error: findErr } = await supabaseAdmin
           .from("games")
-          .insert({ canonical_title: title })
           .select("id")
-          .single();
+          .eq("canonical_title", title)
+          .maybeSingle();
 
-        if (gErr || !newGame?.id) {
+        if (findErr) {
           return NextResponse.json(
-            { error: `Failed to insert game for ${title}: ${gErr?.message || "unknown"}` },
+            { error: `Failed to lookup game for ${title}: ${findErr.message}` },
             { status: 500 }
           );
         }
 
-        gameId = newGame.id;
+        if (existingGame?.id) {
+          // Reuse existing game
+          gameId = existingGame.id;
+        } else {
+          // 2) Insert only if it doesn't exist
+          const { data: newGame, error: gErr } = await supabaseAdmin
+            .from("games")
+            .insert({ canonical_title: title })
+            .select("id")
+            .single();
+
+          if (gErr || !newGame?.id) {
+            console.warn("Steam sync warning:", title, gErr?.message);
+            continue;
+          }
+
+          gameId = newGame.id;
+        }
 
         const { data: newRelease, error: rErr } = await supabaseAdmin
           .from("releases")
