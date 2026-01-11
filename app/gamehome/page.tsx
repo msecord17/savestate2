@@ -395,6 +395,15 @@ export default function GameHomePage() {
                 See Leaderboard →
               </Link>
             </div>
+
+            <div style={{ marginTop: 8 }}>
+              <Link
+                href="/score-methodology"
+                style={{ color: "#2563eb", fontSize: 12, textDecoration: "none" }}
+              >
+                Score Methodology →
+              </Link>
+            </div>
           </div>
         )}
       </div>

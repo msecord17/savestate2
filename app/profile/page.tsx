@@ -241,6 +241,12 @@ export default function ProfilePage() {
                         gamer_score_v11_breakdown: data ?? prev?.gamer_score_v11_breakdown ?? null,
                         gamer_score_v11_updated_at: new Date().toISOString(),
                       }));
+<Link
+  href="/score-methodology"
+  style={{ color: "#2563eb", fontSize: 13, marginTop: 6, display: "inline-block" }}
+>
+  What’s this score?
+</Link>
 
                       // Optional: also refresh from server so it's "truthy"
                       await loadMe();
@@ -393,15 +399,27 @@ export default function ProfilePage() {
                         const res = await fetch("/api/sync/retroachievements", { method: "POST" });
                         const text = await res.text();
                         const data = text ? JSON.parse(text) : null;
-                        if (!res.ok) throw new Error(data?.error || `Sync failed (${res.status})`);
-                        window.alert(`RA Sync OK ✅\nImported: ${data.imported}\nUpdated: ${data.updated}\nTotal: ${data.total}`);
-                        // reload profile stamps
-                        window.location.reload();
+
+                        if (!res.ok) {
+                          window.alert(data?.error || `RA Sync failed (${res.status})`);
+                          return;
+                        }
+
+                        window.alert(`RA Sync OK ✅ Imported ${data?.imported ?? 0} games`);
+                        // Optional: recalc score after sync
+                        await fetch("/api/score/v11");
+                        // reload profile to refresh breakdown
+                        // (assuming you already have loadMe() or load())
+                        // @ts-ignore
+                        if (typeof loadMe === "function") await loadMe();
+                        // @ts-ignore
+                        if (typeof load === "function") await load();
                       } catch (e: any) {
-                        window.alert(e?.message || "RA sync failed");
+                        window.alert(e?.message || "RA Sync failed");
                       }
                     }}
                     style={{
+                      marginTop: 10,
                       padding: "8px 12px",
                       borderRadius: 12,
                       border: "1px solid #e5e7eb",
@@ -410,7 +428,7 @@ export default function ProfilePage() {
                       cursor: "pointer",
                     }}
                   >
-                    Run RA Sync
+                    Run RetroAchievements Sync
                   </button>
                 </div>
               </div>
