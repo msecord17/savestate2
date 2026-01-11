@@ -13,9 +13,7 @@ export async function GET() {
 
   const { data: profile } = await supabase
     .from("profiles")
-    .select(
-      "steam_id, steam_connected_at, steam_last_synced_at, steam_last_sync_count, ra_username, ra_connected_at"
-    )
+    .select("steam_id, steam_connected_at, steam_last_synced_at, steam_last_sync_count, ra_username, ra_connected_at, ra_last_synced_at, ra_last_sync_count, gamer_score_v11, gamer_score_v11_confidence, gamer_score_v11_breakdown, gamer_score_v11_updated_at")
     .eq("user_id", user.id)
     .maybeSingle();
 

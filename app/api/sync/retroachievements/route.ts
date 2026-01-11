@@ -1,239 +1,339 @@
 import { NextResponse } from "next/server";
-import { supabaseRoute } from "@/lib/supabase/route";
-import { supabaseServer } from "@/lib/supabase/server";
+import { createClient } from "@supabase/supabase-js";
+import { supabaseRouteClient } from "../../../../lib/supabase/route-client";
+import { igdbSearchBest } from "@/lib/igdb/server";
 
-type RARecent = {
-  GameID: number;
-  ConsoleID: number;
-  ConsoleName: string;
-  Title: string;
-  LastPlayed?: string | null;
+type RAGameRow = {
+  gameId: number;
+  consoleId?: number;
+  consoleName?: string;
+  title?: string;
+  imageIcon?: string; // e.g. "/Images/1234.png"
+  numAchievements?: number;
+  pointsTotal?: number;
+  lastPlayed?: string; // "2024-01-01 12:34:56" sometimes
 };
 
-type RAWantToPlayItem = {
-  ID: number;
-  Title: string;
-  ConsoleID: number;
-  ConsoleName: string;
-};
-// RetroAchievements ConsoleID -> our platform_key
-// (MVP mapping: extend anytime; unknown IDs fall back to ra:<id>)
-const RA_PLATFORM_KEY_MAP: Record<number, string> = {
-    1: "snes",
-    2: "nes",
-    3: "genesis",
-    4: "sega_cd",
-    5: "gb",
-    6: "gbc",
-    7: "gba",
-    8: "n64",
-    9: "ps1",
-    10: "ps2",
-    11: "psp",
-    12: "dreamcast",
-    13: "saturn",
-    14: "master_system",
-    15: "game_gear",
-    16: "pc_engine",
-    17: "neo_geo",
-    18: "arcade",
-    19: "snes_msx", // if you have MSX separately later, adjust
-    20: "nds",
-    21: "gamecube",
-    22: "wii",
-    23: "wii_u",
-    24: "switch",
-    25: "3ds",
-    26: "ps3",
-    27: "xbox",
-    28: "xbox_360",
-    29: "xbox_one",
-    30: "ps4",
-    31: "ps5",
-  };
-  
+function raIconUrl(path: string | null | undefined) {
+  if (!path) return null;
+  if (path.startsWith("http")) return path;
+  // RA commonly returns paths like "/Images/123.png"
+  return `https://media.retroachievements.org${path}`;
+}
+
+function platformKeyFromConsoleName(name: string | null | undefined) {
+  const n = String(name || "").toLowerCase();
+
+  // MVP mapping (expand later)
+  if (n.includes("super nintendo") || n.includes("snes")) return "snes";
+  if (n.includes("nintendo entertainment system") || n === "nes") return "nes";
+  if (n.includes("mega drive") || n.includes("genesis")) return "genesis";
+  if (n.includes("playstation")) return "ps1";
+  if (n.includes("nintendo 64") || n.includes("n64")) return "n64";
+  if (n.includes("dreamcast")) return "dreamcast";
+  if (n.includes("saturn")) return "saturn";
+  if (n.includes("game boy advance") || n.includes("gba")) return "gba";
+  if (n.includes("game boy color") || n.includes("gbc")) return "gbc";
+  if (n === "game boy" || n.includes("game boy")) return "gb";
+  if (n.includes("arcade")) return "arcade";
+
+  // fallback
+  return "retro";
+}
+
+function platformNameFromConsoleName(name: string | null | undefined) {
+  return name || "RetroAchievements";
+}
+
+async function raFetchJSON(url: string) {
+  const res = await fetch(url, { cache: "no-store" });
+  const json = await res.json().catch(() => null);
+  return { res, json };
+}
+
 export async function POST() {
-  const supabase = await supabaseRoute();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+  try {
+    // A) Logged in user
+    const supabaseUser = await supabaseRouteClient();
+    const { data: userRes, error: userErr } = await supabaseUser.auth.getUser();
+    if (userErr || !userRes?.user) {
+      return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+    }
+    const user = userRes.user;
 
-  // Read RA creds
-  const { data: profile, error: pErr } = await supabase
-    .from("user_profiles")
-    .select("ra_username, ra_api_key")
-    .eq("user_id", user.id)
-    .maybeSingle();
+    // B) Load RA creds from profiles
+    const { data: profile, error: pErr } = await supabaseUser
+      .from("profiles")
+      .select("ra_username, ra_api_key")
+      .eq("user_id", user.id)
+      .maybeSingle();
 
-  if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
+    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
 
-  const raUsername = profile?.ra_username?.trim();
-  const raKey = profile?.ra_api_key?.trim();
+    const ra_username = String(profile?.ra_username ?? "").trim();
+    const ra_api_key = String(profile?.ra_api_key ?? "").trim();
 
-  if (!raUsername || !raKey) {
-    return NextResponse.json(
-      { error: "Missing RA username or API key. Set them in Profile." },
-      { status: 400 }
+    if (!ra_username || !ra_api_key) {
+      return NextResponse.json(
+        { error: "RetroAchievements not connected (missing username or api key)" },
+        { status: 400 }
+      );
+    }
+
+    // C) RA API call: get user games list
+    // Using RA Web API: API_GetUserCompletedGames
+    // Docs: https://api-docs.retroachievements.org/
+    //
+    // We'll use Completed Games because it's stable + meaningful.
+    // You can switch to API_GetUserRecentlyPlayedGames later for "playing".
+    const url =
+      `https://retroachievements.org/API/API_GetUserCompletedGames.php` +
+      `?z=${encodeURIComponent(ra_username)}` +
+      `&y=${encodeURIComponent(ra_api_key)}` +
+      `&u=${encodeURIComponent(ra_username)}`;
+
+    const { res: raRes, json: raJson } = await raFetchJSON(url);
+
+    if (!raRes.ok) {
+      return NextResponse.json(
+        { error: `RA API failed (${raRes.status})`, detail: raJson },
+        { status: 500 }
+      );
+    }
+
+    // RA returns an object keyed by gameId sometimes; normalize to array
+    let games: RAGameRow[] = [];
+    if (Array.isArray(raJson)) {
+      games = raJson as any;
+    } else if (raJson && typeof raJson === "object") {
+      games = Object.values(raJson) as any;
+    }
+
+    if (!games.length) {
+      return NextResponse.json({ ok: true, imported: 0, note: "No completed games returned." });
+    }
+
+    // D) Admin client for catalog writes (games/releases)
+    const supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
-  }
 
-  // 1) Recently played (max 50)  :contentReference[oaicite:4]{index=4}
-  const recentUrl =
-    `https://retroachievements.org/API/API_GetUserRecentlyPlayedGames.php` +
-    `?y=${encodeURIComponent(raKey)}` +
-    `&u=${encodeURIComponent(raUsername)}` +
-    `&c=50&o=0`;
+    let imported = 0;
+    let updated = 0;
 
-  const recentRes = await fetch(recentUrl, { cache: "no-store" });
-  if (!recentRes.ok) {
-    const txt = await recentRes.text();
-    return NextResponse.json(
-      { error: `RA recent fetch failed (${recentRes.status}): ${txt}` },
-      { status: 502 }
-    );
-  }
-  const recent = (await recentRes.json()) as RARecent[];
+    for (const g of games) {
+      const raGameId = Number((g as any).GameID ?? g.gameId ?? 0);
+      const title = String((g as any).Title ?? g.title ?? "").trim();
+      const consoleName = String((g as any).ConsoleName ?? g.consoleName ?? "").trim();
+      const iconPath = (g as any).ImageIcon ?? g.imageIcon ?? null;
 
-  // 2) Want-to-play (max 500)  :contentReference[oaicite:5]{index=5}
-  const wtpUrl =
-    `https://retroachievements.org/API/API_GetUserWantToPlayList.php` +
-    `?y=${encodeURIComponent(raKey)}` +
-    `&u=${encodeURIComponent(raUsername)}` +
-    `&c=500&o=0`;
+      if (!raGameId || !title) continue;
 
-  const wtpRes = await fetch(wtpUrl, { cache: "no-store" });
-  if (!wtpRes.ok) {
-    const txt = await wtpRes.text();
-    return NextResponse.json(
-      { error: `RA want-to-play fetch failed (${wtpRes.status}): ${txt}` },
-      { status: 502 }
-    );
-  }
-  const wtpJson = await wtpRes.json();
-  const wantToPlay: RAWantToPlayItem[] = Array.isArray(wtpJson)
-    ? wtpJson
-    : (wtpJson?.Results ?? wtpJson?.results ?? []);
+      const platform_key = platformKeyFromConsoleName(consoleName);
+      const platform_name = platformNameFromConsoleName(consoleName);
+      const cover_url = raIconUrl(iconPath);
 
-  // Helper: ensure game + release exist; return release_id
-  async function ensureRelease(params: {
-    ra_game_id: number;
-    ra_console_id: number;
-    title: string;
-    consoleName: string;
-  }) {
-    // Create/Upsert game (canonical_title)
-    const canonical_title = params.title;
+      // 1) Find existing release by ra_game_id
+      const { data: existingRelease } = await supabaseAdmin
+        .from("releases")
+        .select("id, game_id")
+        .eq("ra_game_id", raGameId)
+        .maybeSingle();
 
-    const { data: gameRow, error: gErr } = await supabaseServer
-      .from("games")
-      .upsert(
-        {
-          canonical_title,
-          genres: [],
-          first_release_year: null,
-        },
-        { onConflict: "canonical_title" }
-      )
-      .select("id")
-      .single();
+      let releaseId: string | null = existingRelease?.id ?? null;
+      let gameId: string | null = existingRelease?.game_id ?? null;
 
-    if (gErr) throw new Error(`games upsert failed: ${gErr.message}`);
+      // 2) If no release, create or reuse game by canonical_title (handle duplicates)
+      if (!releaseId) {
+        // Try find game by canonical_title first (because you have unique constraint)
+        const { data: foundGame } = await supabaseAdmin
+          .from("games")
+          .select("id")
+          .eq("canonical_title", title)
+          .maybeSingle();
 
-    // Create/Upsert release tied to RA GameID
-    const { data: releaseRow, error: rErr } = await supabaseServer
-      .from("releases")
-      .upsert(
-        {
-            game_id: gameRow.id,
-            display_title: params.title,
-            platform_name: params.consoleName,
-          
-            // ✅ required by your schema + consistent keys for filters later
-            platform_key:
-              RA_PLATFORM_KEY_MAP[params.ra_console_id] ?? `ra:${params.ra_console_id}`,
-          
-            source: "retroachievements",
-            ra_game_id: params.ra_game_id,
-            ra_console_id: params.ra_console_id,
-          },
-        { onConflict: "ra_game_id" }
-      )
-      .select("id")
-      .single();
+        if (foundGame?.id) {
+          gameId = foundGame.id;
+        } else {
+          const { data: newGame, error: gErr } = await supabaseAdmin
+            .from("games")
+            .insert({ canonical_title: title })
+            .select("id")
+            .single();
 
-    if (rErr) throw new Error(`releases upsert failed: ${rErr.message}`);
+          if (gErr || !newGame?.id) {
+            // If we raced and hit unique constraint, re-select
+            const { data: retryGame } = await supabaseAdmin
+              .from("games")
+              .select("id")
+              .eq("canonical_title", title)
+              .maybeSingle();
 
-    return releaseRow.id as string;
-  }
+            if (!retryGame?.id) {
+              return NextResponse.json(
+                { error: `Failed to insert/find game for ${title}: ${gErr?.message || "unknown"}` },
+                { status: 500 }
+              );
+            }
+            gameId = retryGame.id;
+          } else {
+            gameId = newGame.id;
+          }
+        }
 
-  // Fetch existing portfolio entries for this user (so we don't overwrite status)
-  const { data: existingEntries, error: eErr } = await supabaseServer
-    .from("portfolio_entries")
-    .select("release_id, status")
-    .eq("user_id", user.id);
+        // Create release tied to RA GameID
+        const { data: newRelease, error: rErr } = await supabaseAdmin
+          .from("releases")
+          .insert({
+            game_id: gameId,
+            display_title: title,
+            platform_name,
+            platform_key,
+            ra_game_id: raGameId,
+            cover_url,
+          })
+          .select("id")
+          .single();
 
-  if (eErr) throw new Error(`portfolio select failed: ${eErr.message}`);
+        if (rErr || !newRelease?.id) {
+          return NextResponse.json(
+            { error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` },
+            { status: 500 }
+          );
+        }
 
-  const existingSet = new Set((existingEntries ?? []).map((x) => x.release_id));
+        releaseId = newRelease.id;
+        imported += 1;
+      } else {
+        // Safe update (don’t overwrite cover_url if already set)
+        await supabaseAdmin
+          .from("releases")
+          .update({
+            display_title: title,
+            platform_name,
+            platform_key,
+            ...(cover_url ? { cover_url } : {}),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", releaseId);
 
-  let added = 0;
-  let updated = 0;
-
-  // Recently played -> status playing (only for new entries)
-  for (const g of recent) {
-    const releaseId = await ensureRelease({
-      ra_game_id: g.GameID,
-      ra_console_id: g.ConsoleID,
-      title: g.Title,
-      consoleName: g.ConsoleName,
-    });
-
-    if (!existingSet.has(releaseId)) {
-      const { error } = await supabaseServer.from("portfolio_entries").insert({
-        user_id: user.id,
-        release_id: releaseId,
-        status: "playing",
-        source: "retroachievements",
-        last_played_at: g.LastPlayed ? new Date(g.LastPlayed).toISOString() : null,
-      });
-      if (!error) {
-        added++;
-        existingSet.add(releaseId);
+        updated += 1;
       }
-    } else {
-      // only update last_played_at, don't touch status
-      await supabaseServer
+
+      // ✅ IGDB enrichment (runs for BOTH new + existing entries)
+      if (gameId) {
+        const { data: gameRow } = await supabaseAdmin
+          .from("games")
+          .select("id, igdb_game_id, summary, genres, developer, publisher, first_release_year")
+          .eq("id", gameId)
+          .maybeSingle();
+
+        const needsIgdb =
+          !gameRow?.igdb_game_id &&
+          (!gameRow?.summary ||
+            !gameRow?.developer ||
+            !gameRow?.publisher ||
+            !gameRow?.first_release_year ||
+            !gameRow?.genres);
+
+        if (needsIgdb) {
+          const hit = await igdbSearchBest(title);
+
+          if (hit?.igdb_game_id) {
+            await supabaseAdmin
+              .from("games")
+              .update({
+                igdb_game_id: hit.igdb_game_id,
+                summary: gameRow?.summary ?? hit.summary,
+                genres: gameRow?.genres ?? hit.genres,
+                developer: gameRow?.developer ?? hit.developer,
+                publisher: gameRow?.publisher ?? hit.publisher,
+                first_release_year: gameRow?.first_release_year ?? hit.first_release_year,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", gameId);
+
+            // If release cover is missing, fill from IGDB (keeps RA icon if already present)
+            if (hit.cover_url) {
+              const { data: relRow } = await supabaseAdmin
+                .from("releases")
+                .select("id, cover_url")
+                .eq("id", releaseId)
+                .maybeSingle();
+
+              if (!relRow?.cover_url) {
+                await supabaseAdmin
+                  .from("releases")
+                  .update({ cover_url: hit.cover_url, updated_at: new Date().toISOString() })
+                  .eq("id", releaseId);
+              }
+            }
+          }
+        }
+      }
+
+      // 3) Upsert portfolio entry (status completed)
+      // We won't overwrite a user's manual status if it's already "playing" etc.
+      // But for completed games, it’s reasonable to mark completed if entry doesn’t exist.
+      const { data: existingEntry, error: eErr } = await supabaseUser
         .from("portfolio_entries")
-        .update({
-          last_played_at: g.LastPlayed ? new Date(g.LastPlayed).toISOString() : null,
-        })
+        .select("status")
         .eq("user_id", user.id)
-        .eq("release_id", releaseId);
-      updated++;
-    }
-  }
+        .eq("release_id", releaseId)
+        .maybeSingle();
 
-  // Want-to-play -> status wishlist (only for new entries)
-  for (const g of wantToPlay) {
-    const releaseId = await ensureRelease({
-      ra_game_id: g.ID,
-      ra_console_id: g.ConsoleID,
-      title: g.Title,
-      consoleName: g.ConsoleName,
-    });
+      if (eErr) {
+        return NextResponse.json(
+          { error: `Failed to check portfolio entry for ${title}: ${eErr.message}` },
+          { status: 500 }
+        );
+      }
 
-    if (!existingSet.has(releaseId)) {
-      const { error } = await supabaseServer.from("portfolio_entries").insert({
-        user_id: user.id,
-        release_id: releaseId,
-        status: "wishlist",
-        source: "retroachievements",
-      });
-      if (!error) {
-        added++;
-        existingSet.add(releaseId);
+      if (!existingEntry) {
+        const { error: insErr } = await supabaseUser.from("portfolio_entries").insert({
+          user_id: user.id,
+          release_id: releaseId,
+          status: "completed",
+          updated_at: new Date().toISOString(),
+        });
+
+        if (insErr) {
+          return NextResponse.json(
+            { error: `Failed to insert portfolio entry for ${title}: ${insErr.message}` },
+            { status: 500 }
+          );
+        }
+      } else {
+        // Optional: if user has it as owned/wishlist, we can upgrade to completed
+        const s = String(existingEntry.status || "");
+        if (s === "owned" || s === "wishlist" || s === "back_burner") {
+          await supabaseUser
+            .from("portfolio_entries")
+            .update({ status: "completed", updated_at: new Date().toISOString() })
+            .eq("user_id", user.id)
+            .eq("release_id", releaseId);
+        }
       }
     }
-  }
 
-  return NextResponse.json({ ok: true, added, updated });
+    // Save stamp
+    await supabaseUser
+      .from("profiles")
+      .update({
+        ra_last_synced_at: new Date().toISOString(),
+        ra_last_sync_count: games.length,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("user_id", user.id);
+
+    return NextResponse.json({
+      ok: true,
+      imported,
+      updated,
+      total: games.length,
+    });
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message || "RA sync failed" }, { status: 500 });
+  }
 }

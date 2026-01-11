@@ -129,7 +129,7 @@ export default function ReleaseDetailPage() {
       setSaving(true);
       setMsg("");
 
-      const res = await fetch("/api/lists/add-item", {
+      const res = await fetch("/api/lists/items", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ list_id: listId, release_id: releaseId }),

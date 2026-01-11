@@ -119,85 +119,8 @@ const [smartErr, setSmartErr] = useState("");
   
   return (
     <div style={{ padding: 24 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-        <h1 style={{ fontSize: 26, marginBottom: 6 }}>Lists</h1>
-        <div
-  style={{
-    border: "1px solid #e5e7eb",
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 16,
-    background: "white",
-  }}
->
-  <div style={{ fontWeight: 800, marginBottom: 8 }}>
-    Create Smart List
-  </div>
-
-  {smartErr && (
-    <div style={{ color: "#b91c1c", marginBottom: 8 }}>
-      {smartErr}
-    </div>
-  )}
-
-  <div style={{ display: "grid", gap: 8 }}>
-    <input
-      value={smartTitle}
-      onChange={(e) => setSmartTitle(e.target.value)}
-      placeholder="Title (e.g., SNES Completed)"
-      style={{
-        padding: "10px 12px",
-        borderRadius: 10,
-        border: "1px solid #e5e7eb",
-      }}
-    />
-
-    <select
-      value={smartStatus}
-      onChange={(e) => setSmartStatus(e.target.value)}
-      style={{
-        padding: "10px 12px",
-        borderRadius: 10,
-        border: "1px solid #e5e7eb",
-      }}
-    >
-      <option value="">Any status</option>
-      <option value="playing">playing</option>
-      <option value="completed">completed</option>
-      <option value="dropped">dropped</option>
-      <option value="back_burner">back burner</option>
-      <option value="wishlist">wishlist</option>
-      <option value="own">own</option>
-      <option value="owned">owned</option>
-    </select>
-
-    <input
-      value={smartPlatform}
-      onChange={(e) => setSmartPlatform(e.target.value)}
-      placeholder='Platform key (e.g. "snes", "ps5")'
-      style={{
-        padding: "10px 12px",
-        borderRadius: 10,
-        border: "1px solid #e5e7eb",
-      }}
-    />
-
-    <button
-      onClick={createSmartList}
-      style={{
-        padding: "10px 12px",
-        borderRadius: 12,
-        border: "1px solid #e5e7eb",
-        background: "white",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      Create Smart List
-    </button>
-  </div>
-</div>
-
+      <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 6 }}>
+        <h1 style={{ fontSize: 26 }}>Lists</h1>
         <span style={{ color: "#6b7280" }}>Make your own collections.</span>
       </div>
 
@@ -249,6 +172,84 @@ const [smartErr, setSmartErr] = useState("");
             }}
           >
             {creating ? "Creating…" : "Create"}
+          </button>
+        </div>
+      </div>
+
+      {/* Create Smart List */}
+      <div
+        style={{
+          border: "1px solid #e5e7eb",
+          borderRadius: 12,
+          padding: 14,
+          maxWidth: 560,
+          marginBottom: 18,
+          background: "white",
+        }}
+      >
+        <div style={{ fontWeight: 900, marginBottom: 10 }}>Create Smart List</div>
+
+        {smartErr && (
+          <div style={{ color: "#b91c1c", marginBottom: 8 }}>
+            {smartErr}
+          </div>
+        )}
+
+        <div style={{ display: "grid", gap: 10 }}>
+          <input
+            value={smartTitle}
+            onChange={(e) => setSmartTitle(e.target.value)}
+            placeholder="Title (e.g., SNES Completed)"
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: "1px solid #e5e7eb",
+            }}
+          />
+
+          <select
+            value={smartStatus}
+            onChange={(e) => setSmartStatus(e.target.value)}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: "1px solid #e5e7eb",
+            }}
+          >
+            <option value="">Any status</option>
+            <option value="playing">playing</option>
+            <option value="completed">completed</option>
+            <option value="dropped">dropped</option>
+            <option value="back_burner">back burner</option>
+            <option value="wishlist">wishlist</option>
+            <option value="own">own</option>
+            <option value="owned">owned</option>
+          </select>
+
+          <input
+            value={smartPlatform}
+            onChange={(e) => setSmartPlatform(e.target.value)}
+            placeholder='Platform key (e.g. "snes", "ps5")'
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: "1px solid #e5e7eb",
+            }}
+          />
+
+          <button
+            onClick={createSmartList}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid #e5e7eb",
+              background: "white",
+              cursor: "pointer",
+              fontWeight: 700,
+              width: 160,
+            }}
+          >
+            Create Smart List
           </button>
         </div>
       </div>

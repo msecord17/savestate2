@@ -105,12 +105,28 @@ export default function ProfilePage() {
   const [scoreLoading, setScoreLoading] = useState(true);
   const [scoreErr, setScoreErr] = useState("");
   const [breakdown, setBreakdown] = useState<ScoreBreakdown | null>(null);
+  const [globalPct, setGlobalPct] = useState<number | null>(null);
 
   async function loadMe() {
     const res = await fetch("/api/profile/me");
     const data = await res.json();
     setUser(data?.user ?? null);
     setProfile(data?.profile ?? null);
+
+    // Pull leaderboard / percentile info
+    try {
+      const res = await fetch("/api/leaderboard/mock?user_id=me", { cache: "no-store" });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+
+      if (res.ok && data?.me?.global_top_percent != null) {
+        setGlobalPct(data.me.global_top_percent);
+      } else {
+        setGlobalPct(null);
+      }
+    } catch (e: any) {
+      setGlobalPct(null);
+    }
   }
 
   async function loadScore() {
@@ -175,6 +191,108 @@ export default function ProfilePage() {
               Signed in as {user.email ?? user.id}
             </div>
 
+            <div id="score" style={{ marginTop: 16 }}>
+              <div style={{ fontWeight: 900, marginBottom: 6 }}>Gamer Lifetime Score (v1.1)</div>
+
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, minWidth: 220 }}>
+                  <div style={{ color: "#64748b", fontSize: 12 }}>Score</div>
+                  <div style={{ fontSize: 28, fontWeight: 900 }}>{profile?.gamer_score_v11 ?? "—"}</div>
+
+                  {typeof globalPct === "number" && (
+                    <div style={{ marginTop: 6, color: "#64748b", fontSize: 12 }}>
+                      Top <strong>{globalPct}%</strong> globally
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, minWidth: 220 }}>
+                  <div style={{ color: "#64748b", fontSize: 12 }}>Confidence</div>
+                  <div style={{ fontSize: 28, fontWeight: 900 }}>{profile?.gamer_score_v11_confidence ?? "—"}%</div>
+                </div>
+              </div>
+
+              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const res = await fetch("/api/score/v11", { method: "GET" });
+                      const ct = res.headers.get("content-type") || "";
+                      const text = await res.text();
+
+                      if (!ct.includes("application/json")) {
+                        window.alert(`Non-JSON from score API (${res.status}).\n\n${text.slice(0, 300)}`);
+                        return;
+                      }
+
+                      const data = text ? JSON.parse(text) : null;
+
+                      if (!res.ok) {
+                        window.alert(`Score API error (${res.status}): ${data?.error || "unknown"}`);
+                        return;
+                      }
+
+                      // ✅ Update UI immediately (no waiting on /api/profile/me)
+                      setProfile((prev: any) => ({
+                        ...(prev ?? {}),
+                        gamer_score_v11: data?.score_total ?? prev?.gamer_score_v11 ?? null,
+                        gamer_score_v11_confidence: data?.confidence ?? prev?.gamer_score_v11_confidence ?? null,
+                        gamer_score_v11_breakdown: data ?? prev?.gamer_score_v11_breakdown ?? null,
+                        gamer_score_v11_updated_at: new Date().toISOString(),
+                      }));
+
+                      // Optional: also refresh from server so it's "truthy"
+                      await loadMe();
+
+                      window.alert(`Updated ✅\nScore: ${data?.score_total}\nConfidence: ${data?.confidence}%`);
+                    } catch (e: any) {
+                      window.alert(`Recalc failed: ${e?.message || e}`);
+                    }
+                  }}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #e5e7eb",
+                    background: "white",
+                    fontWeight: 900,
+                    cursor: "pointer",
+                  }}
+                >
+                  Recalculate score
+                </button>
+
+                <Link href="/era-onboarding" style={{ color: "#7c3aed", fontWeight: 900 }}>
+                  Take the Era History quiz →
+                </Link>
+              </div>
+
+              {profile?.gamer_score_v11_breakdown?.explain?.length ? (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontWeight: 900, marginBottom: 6 }}>Why is my score this?</div>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {profile.gamer_score_v11_breakdown.explain.map((x: any, idx: number) => (
+                      <div
+                        key={idx}
+                        style={{
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 12,
+                          padding: 12,
+                          background: "white",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                          <div style={{ fontWeight: 900 }}>{x.label}</div>
+                          <div style={{ fontWeight: 900 }}>+{x.points}</div>
+                        </div>
+                        <div style={{ color: "#64748b", marginTop: 4, fontSize: 13 }}>{x.detail}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
             <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
               <Link href="/my-portfolio" style={{ color: "#2563eb" }}>
                 My Portfolio →
@@ -197,103 +315,6 @@ export default function ProfilePage() {
                 Refresh
               </button>
             </div>
-          </div>
-
-          {/* Gamer Lifetime Score */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-              <div style={{ fontWeight: 900, fontSize: 16 }}>Gamer Lifetime Score</div>
-              <div style={{ color: "#64748b", fontSize: 13 }}>
-                computed from your portfolio
-              </div>
-            </div>
-
-            {scoreErr ? (
-              <div style={{ color: "#b91c1c", marginTop: 10 }}>{scoreErr}</div>
-            ) : null}
-
-            {!scoreLoading && breakdown ? (
-              <>
-                <div style={{ marginTop: 12, display: "flex", alignItems: "baseline", gap: 10 }}>
-                  <div style={{ fontSize: 44, fontWeight: 900, lineHeight: 1 }}>
-                    {breakdown.total_score}
-                  </div>
-                  <div style={{ color: "#64748b" }}>
-                    points
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    marginTop: 12,
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-                    gap: 10,
-                  }}
-                >
-                  <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
-                    <div style={{ fontWeight: 900 }}>Playtime</div>
-                    <div style={{ color: "#64748b", marginTop: 4, fontSize: 13 }}>
-                      {breakdown.total_playtime_hours} hours
-                    </div>
-                    <div style={{ marginTop: 6, fontWeight: 900 }}>
-                      +{breakdown.total_playtime_points} pts
-                    </div>
-                  </div>
-
-                  <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
-                    <div style={{ fontWeight: 900 }}>Library Size</div>
-                    <div style={{ color: "#64748b", marginTop: 4, fontSize: 13 }}>
-                      {breakdown.total_games_owned} games
-                    </div>
-                    <div style={{ marginTop: 6, fontWeight: 900 }}>
-                      +{breakdown.total_games_owned_points} pts
-                    </div>
-                  </div>
-
-                  <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
-                    <div style={{ fontWeight: 900 }}>Completed</div>
-                    <div style={{ color: "#64748b", marginTop: 4, fontSize: 13 }}>
-                      {breakdown.completed_games} games
-                    </div>
-                    <div style={{ marginTop: 6, fontWeight: 900 }}>
-                      +{breakdown.completed_points} pts
-                    </div>
-                  </div>
-
-                  <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
-                    <div style={{ fontWeight: 900 }}>Platforms</div>
-                    <div style={{ color: "#64748b", marginTop: 4, fontSize: 13 }}>
-                      {breakdown.unique_platforms} unique
-                    </div>
-                    <div style={{ marginTop: 6, fontWeight: 900 }}>
-                      +{breakdown.unique_platform_points} pts
-                    </div>
-                  </div>
-
-                  <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
-                    <div style={{ fontWeight: 900 }}>RetroAchievements</div>
-                    <div style={{ color: "#64748b", marginTop: 4, fontSize: 13 }}>
-                      {breakdown.ra_mastered_games} mastered (stub for now)
-                    </div>
-                    <div style={{ marginTop: 6, fontWeight: 900 }}>
-                      +{breakdown.ra_mastered_points} pts
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ color: "#64748b", fontSize: 12, marginTop: 10 }}>
-                  Note: RetroAchievements "mastered" points are currently 0 until we wire RA mastery into the DB.
-                </div>
-              </>
-            ) : null}
           </div>
 
           {/* Steam */}
@@ -345,14 +366,7 @@ export default function ProfilePage() {
           </div>
 
           {/* RetroAchievements */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
+          <div style={{ marginTop: 18 }}>
             <div style={{ fontWeight: 900, marginBottom: 6 }}>RetroAchievements</div>
 
             {profile?.ra_username ? (
@@ -360,34 +374,64 @@ export default function ProfilePage() {
                 Connected ✅{" "}
                 <span style={{ color: "#64748b" }}>{profile.ra_username}</span>
 
-                {profile?.ra_connected_at ? (
+                {profile?.ra_last_synced_at ? (
                   <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
-                    Connected: {new Date(profile.ra_connected_at).toLocaleString()}
+                    Last synced: {new Date(profile.ra_last_synced_at).toLocaleString()} •{" "}
+                    {profile.ra_last_sync_count ?? 0} games
                   </div>
                 ) : null}
 
-                <div style={{ marginTop: 10 }}>
-                  <Link href="/ra-sync" style={{ color: "#2563eb" }}>
-                    RetroAchievements Sync →
+                <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <Link href="/retroachievements-connect" style={{ color: "#2563eb" }}>
+                    Update RA creds →
                   </Link>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/sync/retroachievements", { method: "POST" });
+                        const text = await res.text();
+                        const data = text ? JSON.parse(text) : null;
+                        if (!res.ok) throw new Error(data?.error || `Sync failed (${res.status})`);
+                        window.alert(`RA Sync OK ✅\nImported: ${data.imported}\nUpdated: ${data.updated}\nTotal: ${data.total}`);
+                        // reload profile stamps
+                        window.location.reload();
+                      } catch (e: any) {
+                        window.alert(e?.message || "RA sync failed");
+                      }
+                    }}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Run RA Sync
+                  </button>
                 </div>
               </div>
             ) : (
-              <a
-                href="/api/auth/retroachievements/start"
-                style={{
-                  display: "inline-block",
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid #e5e7eb",
-                  background: "white",
-                  fontWeight: 900,
-                  textDecoration: "none",
-                  color: "#0f172a",
-                }}
-              >
-                Connect RetroAchievements
-              </a>
+              <div>
+                <Link
+                  href="/retroachievements-connect"
+                  style={{
+                    display: "inline-block",
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #e5e7eb",
+                    background: "white",
+                    fontWeight: 900,
+                    textDecoration: "none",
+                    color: "#0f172a",
+                  }}
+                >
+                  Connect RetroAchievements
+                </Link>
+              </div>
             )}
           </div>
         </div>

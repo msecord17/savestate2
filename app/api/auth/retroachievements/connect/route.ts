@@ -13,14 +13,20 @@ export async function POST(req: Request) {
     const user = userRes.user;
     const body = await req.json().catch(() => ({}));
     const ra_username = String(body?.ra_username ?? "").trim();
+    const ra_api_key = String(body?.ra_api_key ?? "").trim();
 
     if (!ra_username) {
       return NextResponse.json({ error: "Missing ra_username" }, { status: 400 });
     }
 
+    if (!ra_api_key) {
+      return NextResponse.json({ error: "Missing ra_api_key" }, { status: 400 });
+    }
+
     const { error: upErr } = await supabase.from("profiles").upsert({
       user_id: user.id,
       ra_username,
+      ra_api_key,
       ra_connected_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });

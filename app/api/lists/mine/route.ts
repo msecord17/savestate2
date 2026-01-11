@@ -39,6 +39,8 @@ export async function GET() {
     description: l.description ?? null,
     item_count: counts[l.id] ?? 0,
     created_at: l.created_at,
+    is_smart: l.is_smart ?? false,
+    is_curated: l.is_curated ?? false,
   }));
 
   return NextResponse.json(rows);

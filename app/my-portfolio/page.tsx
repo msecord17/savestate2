@@ -61,7 +61,7 @@ export default function MyPortfolioPage() {
   }
 
   async function addToList(listId: string, releaseId: string) {
-    await fetch("/api/lists/add-item", {
+    await fetch("/api/lists/items", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ list_id: listId, release_id: releaseId }),

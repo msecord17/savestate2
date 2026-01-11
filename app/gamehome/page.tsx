@@ -1,33 +1,34 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 type GameMeta = {
+  igdb_game_id?: number | null;
   summary?: string | null;
   genres?: string[] | null;
   developer?: string | null;
   publisher?: string | null;
   first_release_year?: number | null;
-};
+} | null;
 
 type Release = {
   id: string;
-  display_title: string | null;
-  platform_name: string | null;
+  display_title: string;
+  platform_name: string;
   platform_key: string | null;
   cover_url?: string | null;
-  games?: GameMeta | null;
-};
+  games?: GameMeta;
+} | null;
 
 type Item = {
-  entry_id?: string;
+  entry_id: string;
   release_id: string;
   status: string;
-  playtime_minutes?: number | null;
-  last_played_at?: string | null;
-  updated_at?: string;
-  releases: Release | null;
+  playtime_minutes: number;
+  last_played_at: string | null;
+  updated_at: string;
+  releases: Release;
 };
 
 type Section = {
@@ -36,15 +37,42 @@ type Section = {
   items: Item[];
 };
 
+type ListRow = {
+  id: string;
+  title?: string | null;
+  name?: string | null;
+  description?: string | null;
+  item_count?: number | null;
+  is_smart?: boolean | null;
+  is_curated?: boolean | null;
+};
+
 export default function GameHomePage() {
   const [sections, setSections] = useState<Section[]>([]);
-  const [curatedLists, setCuratedLists] = useState<any[]>([]);
-  const [myLists, setMyLists] = useState<any[]>([]);
+  const [curatedLists, setCuratedLists] = useState<ListRow[]>([]);
+  const [myLists, setMyLists] = useState<ListRow[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
+  // Gamer Score
+  const [score, setScore] = useState<number | null>(null);
+  const [confidence, setConfidence] = useState<number | null>(null);
+  const [globalPct, setGlobalPct] = useState<number | null>(null);
+
+  const [showScoreInfo, setShowScoreInfo] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
+
+    async function safeJson(res: Response) {
+      const text = await res.text();
+      try {
+        return text ? JSON.parse(text) : null;
+      } catch {
+        return { __raw: text };
+      }
+    }
 
     async function loadAll() {
       try {
@@ -52,26 +80,66 @@ export default function GameHomePage() {
         setErr("");
 
         // 1) GameHome sections
-        const ghRes = await fetch("/api/gamehome");
-        const ghText = await ghRes.text();
-        const ghData = ghText ? JSON.parse(ghText) : null;
-        if (!ghRes.ok) throw new Error(ghData?.error || `Failed (status ${ghRes.status})`);
+        const ghRes = await fetch("/api/gamehome", { cache: "no-store" });
+        const ghData = await safeJson(ghRes);
+        if (!ghRes.ok) throw new Error(ghData?.error || `GameHome failed (${ghRes.status})`);
+        if (!cancelled) setSections(Array.isArray(ghData?.sections) ? ghData.sections : []);
 
         // 2) Curated lists
-        const curatedRes = await fetch("/api/lists/curated");
-        const curatedText = await curatedRes.text();
-        const curatedData = curatedText ? JSON.parse(curatedText) : null;
+        const cRes = await fetch("/api/lists/curated", { cache: "no-store" });
+        const cData = await safeJson(cRes);
+        if (!cancelled) setCuratedLists(Array.isArray(cData) ? cData : []);
 
         // 3) Your lists
-        const mineRes = await fetch("/api/lists/mine");
-        const mineText = await mineRes.text();
-        const mineData = mineText ? JSON.parse(mineText) : null;
+        const mRes = await fetch("/api/lists/mine", { cache: "no-store" });
+        const mData = await safeJson(mRes);
+        if (!cancelled) setMyLists(Array.isArray(mData) ? mData : []);
 
-        if (cancelled) return;
+        // 4) Gamer score from profile (same as Profile page)
+        try {
+          const pRes = await fetch("/api/profile/me", { cache: "no-store" });
+          const pData = await safeJson(pRes);
+          if (pRes.ok && pData?.profile) {
+            const profile = pData.profile;
+            if (!cancelled) {
+              setScore(
+                typeof profile.gamer_score_v11 === "number"
+                  ? profile.gamer_score_v11
+                  : null
+              );
+              setConfidence(
+                typeof profile.gamer_score_v11_confidence === "number"
+                  ? profile.gamer_score_v11_confidence
+                  : null
+              );
+            }
+          } else {
+            if (!cancelled) {
+              setScore(null);
+              setConfidence(null);
+            }
+          }
+        } catch {
+          if (!cancelled) {
+            setScore(null);
+            setConfidence(null);
+          }
+        }
 
-        setSections(Array.isArray(ghData?.sections) ? ghData.sections : []);
-        setCuratedLists(Array.isArray(curatedData) ? curatedData : []);
-        setMyLists(Array.isArray(mineData) ? mineData : []);
+        // 5) Global standing percentile (same as Profile page)
+        try {
+          const gRes = await fetch("/api/leaderboard/mock?user_id=me", { cache: "no-store" });
+          const text = await gRes.text();
+          const gData = text ? JSON.parse(text) : null;
+
+          if (gRes.ok && gData?.me?.global_top_percent != null) {
+            if (!cancelled) setGlobalPct(gData.me.global_top_percent);
+          } else {
+            if (!cancelled) setGlobalPct(null);
+          }
+        } catch {
+          if (!cancelled) setGlobalPct(null);
+        }
       } catch (e: any) {
         if (!cancelled) setErr(e?.message || "Failed to load GameHome");
       } finally {
@@ -85,15 +153,14 @@ export default function GameHomePage() {
     };
   }, []);
 
-  if (loading) {
-    return <div style={{ padding: 24, color: "#6b7280" }}>Loading…</div>;
-  }
+
+  if (loading) return <div style={{ padding: 24, color: "#6b7280" }}>Loading…</div>;
 
   if (err) {
     return (
       <div style={{ padding: 24 }}>
         <div style={{ color: "#b91c1c", marginBottom: 12 }}>{err}</div>
-        <div>
+        <div style={{ color: "#64748b" }}>
           If you’re not logged in: <Link href="/login">Login</Link>
         </div>
       </div>
@@ -110,21 +177,36 @@ export default function GameHomePage() {
           padding-bottom: 8px;
           scroll-snap-type: x mandatory;
         }
-        .card {
-          min-width: 220px;
-          max-width: 220px;
+
+        .gameCard {
+          min-width: 240px;
+          max-width: 240px;
           border: 1px solid #e5e7eb;
-          border-radius: 12px;
+          border-radius: 14px;
           padding: 12px;
           background: white;
           scroll-snap-align: start;
           transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+          display: flex;
+          gap: 10px;
         }
-        .card:hover {
+        .gameCard:hover {
           transform: translateY(-2px);
           box-shadow: 0 10px 25px rgba(0,0,0,0.08);
           border-color: #cbd5e1;
         }
+
+        .cover {
+          width: 66px;
+          height: 88px;
+          border-radius: 12px;
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+          overflow: hidden;
+          flex-shrink: 0;
+        }
+        .coverImg { width: 100%; height: 100%; object-fit: cover; display: block; }
+
         .pill {
           display: inline-flex;
           gap: 6px;
@@ -136,11 +218,109 @@ export default function GameHomePage() {
           color: #334155;
           background: #f8fafc;
         }
+
+        .shimmerBtn {
+          position: relative;
+          border-radius: 10px;
+          border: 1px solid #e5e7eb;
+          padding: 8px 10px;
+          background: white;
+          cursor: pointer;
+          overflow: hidden;
+        }
+        .shimmerBtn::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          padding: 1.5px;
+          background: linear-gradient(
+            135deg,
+            rgba(203, 213, 225, 0.9),
+            rgba(167, 139, 250, 0.85),
+            rgba(203, 213, 225, 0.9)
+          );
+          -webkit-mask:
+            linear-gradient(#000 0 0) content-box,
+            linear-gradient(#000 0 0);
+          -webkit-mask-composite: xor;
+          mask-composite: exclude;
+          opacity: 0;
+          transition: opacity 140ms ease;
+          pointer-events: none;
+        }
+        .shimmerBtn:hover::after { opacity: 1; }
+
+        .scoreStrip {
+          border: 1px solid #e5e7eb;
+          border-radius: 16px;
+          padding: 14px;
+          background: white;
+          margin-bottom: 16px;
+        }
+        .scoreTop {
+          display: flex;
+          gap: 14px;
+          align-items: baseline;
+          justify-content: space-between;
+          flex-wrap: wrap;
+        }
+        .scoreTitle {
+          font-weight: 900;
+          font-size: 16px;
+          color: #0f172a;
+          display: flex;
+          gap: 10px;
+          align-items: baseline;
+          flex-wrap: wrap;
+        }
+        .scoreMeta { font-size: 12px; color: #64748b; }
+        .scoreValue {
+          font-size: 28px;
+          font-weight: 900;
+          color: #0f172a;
+        }
+        .scoreGlobal {
+          margin-top: 6px;
+          color: #64748b;
+          font-size: 12px;
+        }
+        .scoreInfoBtn {
+          border: none;
+          background: transparent;
+          color: #2563eb;
+          cursor: pointer;
+          padding: 0;
+          font-size: 12px;
+          text-decoration: underline;
+        }
+        .scoreInfoBox {
+          margin-top: 10px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+          color: #334155;
+          line-height: 1.55;
+        }
+        .ctaRow {
+          display: flex;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-top: 10px;
+        }
+        .ctaLink {
+          color: #2563eb;
+          font-weight: 700;
+          font-size: 13px;
+          text-decoration: none;
+        }
+
         .listCard {
           min-width: 260px;
           max-width: 260px;
           border: 1px solid #e5e7eb;
-          border-radius: 12px;
+          border-radius: 14px;
           padding: 12px;
           background: white;
           scroll-snap-align: start;
@@ -151,82 +331,75 @@ export default function GameHomePage() {
           box-shadow: 0 10px 25px rgba(0,0,0,0.08);
           border-color: #cbd5e1;
         }
-
-        /* Animated premium edge on hover */
-        .shimmerBtn {
-          position: relative;
-          border-radius: 10px;
+        .badge {
+          font-size: 12px;
+          padding: 3px 8px;
+          border-radius: 999px;
           border: 1px solid #e5e7eb;
-          padding: 8px 10px;
           background: white;
-          cursor: pointer;
-          font-weight: 900;
-          isolation: isolate;
-        }
-        .shimmerBtn::before {
-          content: "";
-          position: absolute;
-          inset: -2px;
-          border-radius: inherit;
-          padding: 2px;
-          background: conic-gradient(
-            from 0deg,
-            rgba(167, 139, 250, 1),
-            rgba(203, 213, 225, 1),
-            rgba(167, 139, 250, 1),
-            rgba(203, 213, 225, 1),
-            rgba(167, 139, 250, 1)
-          );
-          -webkit-mask: 
-            linear-gradient(#fff 0 0) content-box, 
-            linear-gradient(#fff 0 0);
-          -webkit-mask-composite: xor;
-          mask-composite: exclude;
-          opacity: 0;
-          transition: opacity 200ms ease;
-          pointer-events: none;
-          z-index: -1;
-        }
-        .shimmerBtn::after {
-          content: "";
-          position: absolute;
-          inset: -2px;
-          border-radius: inherit;
-          padding: 2px;
-          background: conic-gradient(
-            from 180deg,
-            transparent 0%,
-            transparent 40%,
-            rgba(255, 255, 255, 0.6) 50%,
-            transparent 60%,
-            transparent 100%
-          );
-          -webkit-mask: 
-            linear-gradient(#fff 0 0) content-box, 
-            linear-gradient(#fff 0 0);
-          -webkit-mask-composite: xor;
-          mask-composite: exclude;
-          opacity: 0;
-          pointer-events: none;
-          z-index: -1;
-        }
-        .shimmerBtn:hover::before {
-          opacity: 1;
-        }
-        .shimmerBtn:hover::after {
-          opacity: 1;
-          animation: shimmerRotate 2s linear infinite;
-        }
-        @keyframes shimmerRotate {
-          0% {
-            transform: rotate(0deg);
-          }
-          100% {
-            transform: rotate(360deg);
-          }
+          color: #0f172a;
+          line-height: 1.2;
+          white-space: nowrap;
         }
       `}</style>
 
+      {/* Gamer Score strip */}
+      <div className="scoreStrip">
+        <div className="scoreTop">
+          <div className="scoreTitle">
+            <span>Gamer Score</span>
+            {typeof confidence === "number" ? (
+              <span className="scoreMeta">Confidence {confidence}%</span>
+            ) : null}
+          </div>
+
+          <button
+            className="scoreInfoBtn"
+            onClick={() => setShowScoreInfo((v) => !v)}
+            type="button"
+          >
+            What’s this score?
+          </button>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <div className="scoreValue">
+            {score != null ? score.toLocaleString() : "—"}
+          </div>
+          {typeof globalPct === "number" && (
+            <div className="scoreGlobal">
+              Top <strong>{globalPct}%</strong> globally
+            </div>
+          )}
+        </div>
+
+        {showScoreInfo && (
+          <div className="scoreInfoBox">
+            <p style={{ margin: 0 }}>
+              <strong>Gamer Score</strong> is your “lifetime resume” of gaming: playtime, achievements, and
+              completion signals blended into one number — designed to be fun, shareable, and grounded in data.
+            </p>
+            <p style={{ margin: "10px 0 0 0" }}>
+              Level it up by connecting <strong>Steam</strong> (playtime), <strong>RetroAchievements</strong> (verified mastery),
+              and taking the <strong>Era Quiz</strong> to capture older history we can’t auto-sync.
+            </p>
+
+            <div className="ctaRow">
+              <Link className="ctaLink" href="/profile">
+                Connect Steam / RetroAchievements →
+              </Link>
+              <Link className="ctaLink" href="/era-quiz">
+                Take the Era Quiz →
+              </Link>
+              <Link className="ctaLink" href="/leaderboard">
+                See Leaderboard →
+              </Link>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Header */}
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h1 style={{ fontSize: 26, marginBottom: 6 }}>GameHome</h1>
         <span style={{ color: "#6b7280" }}>Your library, distilled.</span>
@@ -254,7 +427,7 @@ export default function GameHomePage() {
           </div>
 
           <div className="row">
-            {myLists.slice(0, 10).map((l: any) => (
+            {myLists.slice(0, 10).map((l) => (
               <Link
                 key={l.id}
                 href={`/lists/${l.id}`}
@@ -263,7 +436,7 @@ export default function GameHomePage() {
                 <div className="listCard">
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                     <div style={{ fontWeight: 900 }}>
-                      {(l.title ?? l.name) || "Untitled list"}
+                      {l.title ?? l.name ?? "Untitled list"}
                     </div>
                     <div style={{ color: "#64748b", fontSize: 12, whiteSpace: "nowrap" }}>
                       {l.item_count ?? 0} games
@@ -274,16 +447,17 @@ export default function GameHomePage() {
                     {l.description || "—"}
                   </div>
 
-                  <div style={{ marginTop: 10 }}>
-                    <button
-                      className="shimmerBtn"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        window.location.href = `/lists/${l.id}`;
-                      }}
-                    >
-                      Open
-                    </button>
+                  <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {l.is_smart ? (
+                      <span className="badge" title="This list is computed from rules">
+                        ⚡ Smart
+                      </span>
+                    ) : null}
+                    {l.is_curated ? (
+                      <span className="badge" title="Curated list">
+                        ⭐ Curated
+                      </span>
+                    ) : null}
                   </div>
                 </div>
               </Link>
@@ -303,14 +477,14 @@ export default function GameHomePage() {
               marginBottom: 10,
             }}
           >
-            <div style={{ fontWeight: 800, fontSize: 16 }}>Curated</div>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>Curated Lists</div>
             <Link href="/lists" style={{ color: "#2563eb", fontSize: 13 }}>
               View all →
             </Link>
           </div>
 
           <div className="row">
-            {curatedLists.slice(0, 10).map((l: any) => (
+            {curatedLists.slice(0, 10).map((l) => (
               <Link
                 key={l.id}
                 href={`/lists/${l.id}`}
@@ -319,10 +493,10 @@ export default function GameHomePage() {
                 <div className="listCard">
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                     <div style={{ fontWeight: 900 }}>
-                      {(l.title ?? l.name) || "Curated list"}
+                      {l.title ?? l.name ?? "Untitled list"}
                     </div>
                     <div style={{ color: "#64748b", fontSize: 12, whiteSpace: "nowrap" }}>
-                      ⭐ Curated
+                      {l.item_count ?? 0} games
                     </div>
                   </div>
 
@@ -330,16 +504,17 @@ export default function GameHomePage() {
                     {l.description || "—"}
                   </div>
 
-                  <div style={{ marginTop: 10 }}>
-                    <button
-                      className="shimmerBtn"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        window.location.href = `/lists/${l.id}`;
-                      }}
-                    >
-                      Open
-                    </button>
+                  <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {l.is_smart ? (
+                      <span className="badge" title="This list is computed from rules">
+                        ⚡ Smart
+                      </span>
+                    ) : null}
+                    {l.is_curated ? (
+                      <span className="badge" title="Curated list">
+                        ⭐ Curated
+                      </span>
+                    ) : null}
                   </div>
                 </div>
               </Link>
@@ -349,74 +524,63 @@ export default function GameHomePage() {
       )}
 
       {/* Sections */}
-      {sections.length === 0 ? (
+      {sections.length === 0 && (
         <div style={{ color: "#6b7280" }}>
           No sections yet — add games or sync Steam/RetroAchievements.
         </div>
-      ) : (
-        <div style={{ display: "grid", gap: 22 }}>
-          {sections.map((section) => (
-            <div key={section.key}>
-              <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>
-                {section.title}
-              </div>
+      )}
 
-              <div className="row">
-                {section.items.map((item: Item) => {
-                  const rel = item.releases;
-                  const title = rel?.display_title ?? "Unknown";
+      <div style={{ display: "grid", gap: 22 }}>
+        {sections.map((section) => (
+          <div key={section.key}>
+            <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>
+              {section.title}
+            </div>
 
-                  const platform = rel?.platform_name ?? "—";
+            <div className="row">
+              {section.items.map((item) => {
+                const rel = item.releases;
+                const title = rel?.display_title ?? "Unknown";
+                const platform = rel?.platform_name ?? "—";
+                const cover = rel?.cover_url ?? null;
 
-                  const year = rel?.games?.first_release_year ?? null;
-                  const dev = rel?.games?.developer ?? null;
-                  const genres = Array.isArray(rel?.games?.genres) ? rel!.games!.genres! : [];
+                // Optional: metadata line (safe)
+                const year = rel?.games?.first_release_year ?? null;
+                const dev = rel?.games?.developer ?? null;
+                const genres = Array.isArray(rel?.games?.genres) ? rel!.games!.genres! : [];
 
-                  return (
-                    <Link
-                      key={item.entry_id ?? item.release_id}
-                      href={rel?.id ? `/releases/${rel.id}` : "#"}
-                      style={{ textDecoration: "none", color: "inherit" }}
-                      onClick={(e) => {
-                        if (!rel?.id) e.preventDefault();
-                      }}
-                    >
-                      <div className="card">
-                        {/* Cover (optional) */}
-                        <div
-                          style={{
-                            width: "100%",
-                            height: 110,
-                            borderRadius: 10,
-                            border: "1px solid #e5e7eb",
-                            background: "#f8fafc",
-                            overflow: "hidden",
-                            marginBottom: 10,
-                          }}
-                        >
-                          {rel?.cover_url ? (
-                            <img
-                              src={rel.cover_url}
-                              alt={rel.display_title ?? "cover"}
-                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                            />
-                          ) : null}
-                        </div>
+                return (
+                  <Link
+                    key={item.entry_id ?? item.release_id}
+                    href={rel?.id ? `/releases/${rel.id}` : "#"}
+                    style={{ textDecoration: "none", color: "inherit" }}
+                    onClick={(e) => {
+                      if (!rel?.id) e.preventDefault();
+                    }}
+                  >
+                    <div className="gameCard">
+                      {/* Cover */}
+                      <div className="cover">
+                        {cover ? (
+                          <img className="coverImg" src={cover} alt={title} />
+                        ) : null}
+                      </div>
 
-                        <div style={{ fontWeight: 800, marginBottom: 8 }}>
-                          {rel?.display_title ?? "Unknown"}
+                      {/* Info */}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 900, marginBottom: 6, lineHeight: 1.2 }}>
+                          {title}
                         </div>
 
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                           <span className="pill">{platform}</span>
-                          <span className="pill">{item.status.replace("_", " ")}</span>
+                          <span className="pill">{String(item.status).replace("_", " ")}</span>
                         </div>
 
-                        {/* Metadata line */}
                         {(year || dev || genres.length > 0) && (
                           <div
                             style={{
-                              marginTop: 8,
+                              marginTop: 7,
                               color: "#64748b",
                               fontSize: 12,
                               display: "flex",
@@ -427,7 +591,6 @@ export default function GameHomePage() {
                           >
                             {year ? <span>{year}</span> : null}
                             {dev ? <span>• {dev}</span> : null}
-
                             {genres.length > 0 ? (
                               <span style={{ display: "inline-flex", gap: 6 }}>
                                 {genres.slice(0, 2).map((g: string) => (
@@ -451,13 +614,7 @@ export default function GameHomePage() {
                           </div>
                         )}
 
-                        <div style={{ marginTop: 10, color: "#64748b", fontSize: 12 }}>
-                          {item.last_played_at
-                            ? `Last played: ${new Date(item.last_played_at).toLocaleDateString()}`
-                            : "Last played: —"}
-                        </div>
-
-                        <div style={{ marginTop: 10 }}>
+                        <div style={{ marginTop: 8 }}>
                           <button
                             className="shimmerBtn"
                             onClick={(e) => {
@@ -469,14 +626,14 @@ export default function GameHomePage() {
                           </button>
                         </div>
                       </div>
-                    </Link>
-                  );
-                })}
-              </div>
+                    </div>
+                  </Link>
+                );
+              })}
             </div>
-          ))}
-        </div>
-      )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

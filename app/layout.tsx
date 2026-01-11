@@ -19,6 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Link href="/my-portfolio">My Portfolio</Link>
           <Link href="/profile">Profile</Link>
           <Link href="/lists">Lists</Link>
+          <Link href="/leaderboard">Leaderboard</Link>
           <Link href="/add-games">Add Games</Link>
 
           <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
