@@ -1,81 +1,110 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import Link from "next/link";
 
+function safeJsonParse(text: string) {
+  try {
+    return { ok: true as const, value: JSON.parse(text) };
+  } catch {
+    return { ok: false as const, value: null };
+  }
+}
+
 export default function SteamSyncPage() {
-  const router = useRouter();
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
-  const [error, setError] = useState("");
+  const [running, setRunning] = useState(false);
+  const [status, setStatus] = useState<number | null>(null);
+  const [output, setOutput] = useState<string>("");
 
   async function runSync() {
-    setLoading(true);
-    setError("");
-    setResult(null);
+    setRunning(true);
+    setStatus(null);
+    setOutput("");
 
     try {
       const res = await fetch("/api/sync/steam", { method: "POST" });
+      setStatus(res.status);
+
       const text = await res.text();
-      const data = text ? JSON.parse(text) : null;
+
+      // Try JSON first, fall back to raw text (fixes the “Unexpected token 'A'” crash)
+      const parsed = safeJsonParse(text);
 
       if (!res.ok) {
-        throw new Error(data?.error || `Sync failed (${res.status})`);
+        if (parsed.ok) {
+          setOutput(JSON.stringify(parsed.value, null, 2));
+        } else {
+          setOutput(text || "(empty error response)");
+        }
+        return;
       }
 
-      setResult(data);
-      
-      // Redirect to profile after a short delay
-      setTimeout(() => {
-        router.push("/profile");
-      }, 2000);
+      if (parsed.ok) {
+        setOutput(JSON.stringify(parsed.value, null, 2));
+      } else {
+        setOutput(text || "(empty response)");
+      }
     } catch (e: any) {
-      setError(e?.message || "Steam sync failed");
+      setOutput(`Fetch failed: ${e?.message || String(e)}`);
     } finally {
-      setLoading(false);
+      setRunning(false);
     }
   }
 
-  useEffect(() => {
-    runSync();
-  }, []);
-
   return (
     <div style={{ padding: 24 }}>
-      <h1 style={{ fontSize: 26, fontWeight: 900, marginBottom: 10 }}>Steam Sync</h1>
+      <h1 style={{ fontSize: 32, fontWeight: 900, marginBottom: 8 }}>
+        Steam Sync
+      </h1>
 
-      {loading && (
-        <div style={{ color: "#6b7280", marginBottom: 12 }}>Syncing your Steam library...</div>
-      )}
+      <div style={{ color: "#64748b", marginBottom: 18 }}>
+        This pulls your owned Steam games + playtime into your Portfolio.
+      </div>
 
-      {error && (
-        <div style={{ color: "#b91c1c", marginBottom: 12 }}>
-          <div style={{ fontWeight: 900, marginBottom: 4 }}>Error</div>
-          <div>{error}</div>
-        </div>
-      )}
+      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        <button
+          onClick={runSync}
+          disabled={running}
+          style={{
+            padding: "10px 14px",
+            borderRadius: 12,
+            border: "1px solid #e5e7eb",
+            background: "white",
+            fontWeight: 900,
+            cursor: running ? "not-allowed" : "pointer",
+          }}
+        >
+          {running ? "Syncing…" : "Run Steam Sync"}
+        </button>
 
-      {result && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ color: "#16a34a", fontWeight: 900, marginBottom: 4 }}>Sync Complete ✅</div>
-          <div style={{ color: "#64748b", fontSize: 14 }}>
-            {result.imported ? `Imported: ${result.imported} games` : null}
-            {result.updated ? ` • Updated: ${result.updated} games` : null}
-            {result.total ? ` • Total: ${result.total} games` : null}
-            {result.note ? <div style={{ marginTop: 8 }}>{result.note}</div> : null}
-          </div>
-          <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
-            Redirecting to profile...
-          </div>
-        </div>
-      )}
-
-      <div style={{ marginTop: 16 }}>
         <Link href="/profile" style={{ color: "#2563eb" }}>
           ← Back to Profile
         </Link>
       </div>
+
+      {status !== null && (
+        <div style={{ marginTop: 14, color: status >= 400 ? "#b91c1c" : "#0f172a" }}>
+          HTTP Status: <strong>{status}</strong>
+        </div>
+      )}
+
+      {output ? (
+        <pre
+          style={{
+            marginTop: 14,
+            padding: 12,
+            borderRadius: 12,
+            border: "1px solid #e5e7eb",
+            background: "#0b1220",
+            color: "#e2e8f0",
+            overflowX: "auto",
+            fontSize: 12,
+            lineHeight: 1.4,
+          }}
+        >
+          {output}
+        </pre>
+      ) : null}
     </div>
   );
 }
