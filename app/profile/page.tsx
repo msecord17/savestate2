@@ -107,6 +107,26 @@ export default function ProfilePage() {
   const [breakdown, setBreakdown] = useState<ScoreBreakdown | null>(null);
   const [globalPct, setGlobalPct] = useState<number | null>(null);
 
+  async function postAndAlert(url: string) {
+    const res = await fetch(url, { method: "POST" });
+    const text = await res.text();
+
+    // Always show something
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      // HTML error pages become obvious here
+    }
+
+    const msg =
+      `POST ${url}\n` +
+      `Status: ${res.status}\n\n` +
+      (data ? JSON.stringify(data, null, 2) : text || "(empty)");
+
+    window.alert(msg);
+  }
+
   async function loadMe() {
     const res = await fetch("/api/profile/me");
     const data = await res.json();
@@ -372,7 +392,14 @@ export default function ProfilePage() {
           </div>
 
           {/* RetroAchievements */}
-          <div style={{ marginTop: 18 }}>
+          <div
+            style={{
+              border: "1px solid #e5e7eb",
+              borderRadius: 14,
+              padding: 14,
+              background: "white",
+            }}
+          >
             <div style={{ fontWeight: 900, marginBottom: 6 }}>RetroAchievements</div>
 
             {profile?.ra_username ? (
@@ -448,6 +475,109 @@ export default function ProfilePage() {
                   }}
                 >
                   Connect RetroAchievements
+                </Link>
+              </div>
+            )}
+          </div>
+
+          {/* PlayStation */}
+          <div
+            style={{
+              border: "1px solid #e5e7eb",
+              borderRadius: 14,
+              padding: 14,
+              background: "white",
+            }}
+          >
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>PlayStation</div>
+
+            {profile?.psn_online_id || profile?.psn_npsso ? (
+              <div style={{ color: "#0f172a" }}>
+                Connected ✅{" "}
+                {profile?.psn_online_id ? (
+                  <span style={{ color: "#64748b" }}>{profile.psn_online_id}</span>
+                ) : null}
+
+                {profile?.psn_last_synced_at ? (
+                  <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
+                    Last synced: {new Date(profile.psn_last_synced_at).toLocaleString()} •{" "}
+                    {profile.psn_last_sync_count ?? 0} games
+                  </div>
+                ) : null}
+
+                <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <Link href="/playstation-connect" style={{ color: "#2563eb" }}>
+                    Update PSN creds →
+                  </Link>
+
+                  <button
+                    type="button"
+                    onClick={() => postAndAlert("/api/sync/psn")}
+                    style={{
+                      marginTop: 10,
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Run PSN Sync
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/psn/import", { method: "POST" });
+                        const text = await res.text();
+                        const data = text ? JSON.parse(text) : null;
+
+                        if (!res.ok) {
+                          window.alert(`Import failed (${res.status})\n\n${text}`);
+                          return;
+                        }
+
+                        window.alert(
+                          `PSN Import OK ✅\n\nImported: ${data.imported}\nUpdated: ${data.updated}\nMatched: ${data.matched}\nTotal PSN titles: ${data.total}\n\nCreated games: ${data.created_games}\nCreated PSN releases: ${data.created_releases}`
+                        );
+
+                        // reload your profile page state if you want
+                        // e.g. await loadMe();
+                      } catch (e: any) {
+                        window.alert(`Import error: ${e?.message || e}`);
+                      }
+                    }}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Import PSN Titles → Library
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <Link
+                  href="/playstation-connect"
+                  style={{
+                    display: "inline-block",
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #e5e7eb",
+                    background: "white",
+                    fontWeight: 900,
+                    textDecoration: "none",
+                    color: "#0f172a",
+                  }}
+                >
+                  Connect PlayStation
                 </Link>
               </div>
             )}
