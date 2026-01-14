@@ -582,65 +582,6 @@ export default function ProfilePage() {
               </div>
             )}
           </div>
-
-          {/* Xbox */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>Xbox</div>
-
-            {profile?.xbox_connected_at ? (
-              <div style={{ color: "#0f172a" }}>
-                Connected ✅
-
-                <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
-                  {profile?.xbox_last_synced_at
-                    ? <>Last synced: {new Date(profile.xbox_last_synced_at).toLocaleString()} • {profile.xbox_last_sync_count ?? 0} titles</>
-                    : "Not synced yet"}
-                </div>
-
-                <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
-                  Gamerscore: <strong>{profile.xbox_gamerscore ?? 0}</strong> • Titles with achievements:{" "}
-                  <strong>{profile.xbox_achievement_count ?? 0}</strong>
-                </div>
-
-                <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center" }}>
-                  <Link href="/xbox-connect" style={{ color: "#2563eb" }}>
-                    Xbox settings →
-                  </Link>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const res = await fetch("/api/sync/xbox", { method: "POST" });
-                      const text = await res.text();
-                      alert(`Status: ${res.status}\n\n${text}`);
-                      await loadMe();
-                    }}
-                    style={{
-                      padding: "8px 12px",
-                      borderRadius: 12,
-                      border: "1px solid #e5e7eb",
-                      background: "white",
-                      fontWeight: 900,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Run Xbox Sync (debug)
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <Link href="/xbox-connect" style={{ color: "#2563eb" }}>
-                Connect Xbox →
-              </Link>
-            )}
-          </div>
         </div>
       )}
     </div>
