@@ -9,20 +9,24 @@ export async function GET(req: Request) {
     process.env.XBOX_REDIRECT_URI || `${origin}/api/auth/xbox/callback`;
 
   if (!clientId) {
-    return NextResponse.json({ error: "Missing XBOX_CLIENT_ID" }, { status: 500 });
+    return NextResponse.redirect(
+      `${origin}/profile?error=missing_xbox_client_id`
+    );
   }
 
-  // Use Live.com OAuth (consumer) for Xbox scope support
-  const authUrl = new URL("https://login.live.com/oauth20_authorize.srf");
-  authUrl.searchParams.set("client_id", clientId);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("redirect_uri", redirectUri);
+  // Use the consumer authority for personal Microsoft accounts
+  const authorizeUrl = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
 
-  // This is the key change:
-  authUrl.searchParams.set("scope", "XboxLive.signin offline_access");
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: "code",
+    redirect_uri: redirectUri,
+    response_mode: "query",
+    // NOTE: Keep it minimal & valid. We can add more later.
+    scope: "XboxLive.signin offline_access",
+    state: "savestate",
+    prompt: "select_account",
+  });
 
-  // simple state for MVP
-  authUrl.searchParams.set("state", "savestate");
-
-  return NextResponse.redirect(authUrl.toString());
+  return NextResponse.redirect(`${authorizeUrl}?${params.toString()}`);
 }
