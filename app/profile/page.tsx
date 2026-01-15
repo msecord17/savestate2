@@ -582,6 +582,43 @@ export default function ProfilePage() {
               </div>
             )}
           </div>
+
+          {/* Xbox */}
+          <div
+            style={{
+              border: "1px solid #e5e7eb",
+              borderRadius: 14,
+              padding: 14,
+              background: "white",
+            }}
+          >
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Xbox</div>
+
+            {profile?.xbox_connected_at ? (
+              <div style={{ color: "#0f172a" }}>
+                Connected ✅
+                <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
+                  Connected at: {new Date(profile.xbox_connected_at).toLocaleString()}
+                </div>
+              </div>
+            ) : (
+              <a
+                href="/api/auth/xbox/start"
+                style={{
+                  display: "inline-block",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid #e5e7eb",
+                  background: "white",
+                  fontWeight: 900,
+                  textDecoration: "none",
+                  color: "#0f172a",
+                }}
+              >
+                Connect Xbox
+              </a>
+            )}
+          </div>
         </div>
       )}
     </div>
