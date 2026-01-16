@@ -3,355 +3,222 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-type ScoreBreakdown = {
-  total_score: number;
+type ProfileRow = {
+  // Steam
+  steam_id?: string | null;
+  steam_connected_at?: string | null;
+  steam_last_synced_at?: string | null;
+  steam_last_sync_count?: number | null;
 
-  total_playtime_hours: number;
-  total_playtime_points: number;
+  // RA
+  ra_username?: string | null;
+  ra_connected_at?: string | null;
+  ra_last_synced_at?: string | null;
+  ra_last_sync_count?: number | null;
 
-  total_games_owned: number;
-  total_games_owned_points: number;
+  // PSN
+  psn_connected_at?: string | null;
+  psn_last_synced_at?: string | null;
+  psn_last_sync_count?: number | null;
 
-  completed_games: number;
-  completed_points: number;
+  // Xbox
+  xbox_xuid?: string | null;
+  xbox_connected_at?: string | null;
+  xbox_last_synced_at?: string | null;
+  xbox_last_sync_count?: number | null;
 
-  unique_platforms: number;
-  unique_platform_points: number;
-
-  ra_mastered_games: number;
-  ra_mastered_points: number;
+  // Score v11
+  gamer_score_v11?: number | null;
+  gamer_score_v11_confidence?: number | null;
+  gamer_score_v11_breakdown?: any;
+  gamer_score_v11_updated_at?: string | null;
 };
-
-function RAConnectForm({ onConnected }: { onConnected: () => void }) {
-  const [ra, setRa] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState("");
-
-  return (
-    <div>
-      <div style={{ color: "#64748b", fontSize: 13, marginBottom: 8 }}>
-        Enter your RetroAchievements username to connect.
-      </div>
-
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <input
-          value={ra}
-          onChange={(e) => setRa(e.target.value)}
-          placeholder="RA username (e.g., matt123)"
-          style={{
-            padding: "10px 12px",
-            borderRadius: 12,
-            border: "1px solid #e5e7eb",
-            minWidth: 260,
-          }}
-        />
-
-        <button
-          type="button"
-          disabled={saving}
-          onClick={async () => {
-            setMsg("");
-            const ra_username = ra.trim();
-            if (!ra_username) {
-              setMsg("Enter a username first.");
-              return;
-            }
-
-            try {
-              setSaving(true);
-              const res = await fetch("/api/auth/retroachievements/connect", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ra_username }),
-              });
-
-              const text = await res.text();
-              const data = text ? JSON.parse(text) : null;
-
-              if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
-
-              setMsg("Connected ✅");
-              setRa("");
-              onConnected();
-            } catch (e: any) {
-              setMsg(e?.message || "Failed to connect");
-            } finally {
-              setSaving(false);
-            }
-          }}
-          style={{
-            padding: "10px 12px",
-            borderRadius: 12,
-            border: "1px solid #e5e7eb",
-            background: "white",
-            fontWeight: 900,
-            cursor: "pointer",
-          }}
-        >
-          Connect RA
-        </button>
-
-        {msg ? <div style={{ color: "#64748b", fontSize: 13 }}>{msg}</div> : null}
-      </div>
-    </div>
-  );
-}
 
 export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<any>(null);
-  const [profile, setProfile] = useState<any>(null);
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [err, setErr] = useState("");
 
-  const [scoreLoading, setScoreLoading] = useState(true);
-  const [scoreErr, setScoreErr] = useState("");
-  const [breakdown, setBreakdown] = useState<ScoreBreakdown | null>(null);
-  const [globalPct, setGlobalPct] = useState<number | null>(null);
-
-  async function postAndAlert(url: string) {
-    const res = await fetch(url, { method: "POST" });
+  async function load() {
+    const res = await fetch("/api/profile/me", { cache: "no-store" });
     const text = await res.text();
+    const data = text ? JSON.parse(text) : null;
 
-    // Always show something
-    let data: any = null;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      // HTML error pages become obvious here
-    }
+    if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
 
-    const msg =
-      `POST ${url}\n` +
-      `Status: ${res.status}\n\n` +
-      (data ? JSON.stringify(data, null, 2) : text || "(empty)");
-
-    window.alert(msg);
-  }
-
-  async function loadMe() {
-    const res = await fetch("/api/profile/me");
-    const data = await res.json();
     setUser(data?.user ?? null);
     setProfile(data?.profile ?? null);
+  }
 
-    // Pull leaderboard / percentile info
+  async function runScoreRecalc() {
     try {
-      const res = await fetch("/api/leaderboard/mock?user_id=me", { cache: "no-store" });
+      const res = await fetch("/api/score/v11", { cache: "no-store" });
       const text = await res.text();
       const data = text ? JSON.parse(text) : null;
 
-      if (res.ok && data?.me?.global_top_percent != null) {
-        setGlobalPct(data.me.global_top_percent);
-      } else {
-        setGlobalPct(null);
+      if (!res.ok) {
+        window.alert(`Score API error (${res.status}): ${data?.error || text}`);
+        return;
       }
+
+      // Refresh profile row so score fields update
+      await load();
     } catch (e: any) {
-      setGlobalPct(null);
+      window.alert(`Score recalculation failed: ${e?.message || e}`);
     }
   }
 
-  async function loadScore() {
-    setScoreLoading(true);
-    setScoreErr("");
-
+  async function runSync(path: string, label: string) {
     try {
-      const res = await fetch("/api/profile/score");
+      const res = await fetch(path, { method: "POST" });
       const text = await res.text();
       const data = text ? JSON.parse(text) : null;
 
-      if (!res.ok) throw new Error(data?.error || `Score failed (${res.status})`);
+      if (!res.ok) {
+        window.alert(`${label} sync failed (${res.status}): ${data?.error || text}`);
+        return;
+      }
 
-      setBreakdown(data?.breakdown ?? null);
+      window.alert(
+        `${label} sync OK ✅\nImported: ${data?.imported ?? 0}\nUpdated: ${data?.updated ?? 0}\nTotal: ${data?.total ?? 0}`
+      );
+
+      await load();
     } catch (e: any) {
-      setBreakdown(null);
-      setScoreErr(e?.message || "Failed to load score");
-    } finally {
-      setScoreLoading(false);
+      window.alert(`${label} sync error: ${e?.message || e}`);
     }
-  }
-
-  async function refreshAll() {
-    await loadMe();
-    await loadScore();
   }
 
   useEffect(() => {
-    refreshAll().finally(() => setLoading(false));
+    setLoading(true);
+    setErr("");
+    load()
+      .catch((e: any) => setErr(e?.message || "Failed to load profile"))
+      .finally(() => setLoading(false));
   }, []);
+
+  const score = profile?.gamer_score_v11 ?? null;
+  const conf = profile?.gamer_score_v11_confidence ?? null;
+  const breakdown =
+    typeof profile?.gamer_score_v11_breakdown === "string"
+      ? (() => {
+          try {
+            return JSON.parse(profile!.gamer_score_v11_breakdown as any);
+          } catch {
+            return null;
+          }
+        })()
+      : profile?.gamer_score_v11_breakdown ?? null;
 
   return (
     <div style={{ padding: 24 }}>
-      <h1 style={{ fontSize: 26, fontWeight: 900, marginBottom: 10 }}>Profile</h1>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+        <h1 style={{ fontSize: 26, fontWeight: 900, marginBottom: 10 }}>Profile</h1>
+        <Link href="/gamehome" style={{ color: "#2563eb" }}>GameHome →</Link>
+      </div>
 
-      {(loading || scoreLoading) && <div style={{ color: "#6b7280" }}>Loading…</div>}
+      {loading && <div style={{ color: "#6b7280" }}>Loading…</div>}
+
+      {!loading && err && (
+        <div style={{ color: "#b91c1c", marginBottom: 12 }}>{err}</div>
+      )}
 
       {!loading && !user && (
         <div style={{ color: "#b91c1c" }}>
-          You're not logged in. <Link href="/login">Log in</Link> first, then connect Steam / RetroAchievements.
+          You’re not logged in. Log in first, then connect platforms.
         </div>
       )}
 
       {!loading && user && (
         <div
           style={{
-            display: "grid",
-            gap: 12,
-            maxWidth: 900,
+            border: "1px solid #e5e7eb",
+            borderRadius: 14,
+            padding: 14,
+            background: "white",
           }}
         >
-          {/* Signed in */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
-            <div style={{ fontWeight: 900, marginBottom: 6 }}>
-              Signed in as {user.email ?? user.id}
-            </div>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>
+            Signed in as {user.email ?? user.id}
+          </div>
 
-            <div id="score" style={{ marginTop: 16 }}>
-              <div style={{ fontWeight: 900, marginBottom: 6 }}>Gamer Lifetime Score (v1.1)</div>
+          {/* Gamer Score */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Gamer Score</div>
 
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, minWidth: 220 }}>
-                  <div style={{ color: "#64748b", fontSize: 12 }}>Score</div>
-                  <div style={{ fontSize: 28, fontWeight: 900 }}>{profile?.gamer_score_v11 ?? "—"}</div>
-
-                  {typeof globalPct === "number" && (
-                    <div style={{ marginTop: 6, color: "#64748b", fontSize: 12 }}>
-                      Top <strong>{globalPct}%</strong> globally
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, minWidth: 220 }}>
-                  <div style={{ color: "#64748b", fontSize: 12 }}>Confidence</div>
-                  <div style={{ fontSize: 28, fontWeight: 900 }}>{profile?.gamer_score_v11_confidence ?? "—"}%</div>
-                </div>
-              </div>
-
-              <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const res = await fetch("/api/score/v11", { method: "GET" });
-                      const ct = res.headers.get("content-type") || "";
-                      const text = await res.text();
-
-                      if (!ct.includes("application/json")) {
-                        window.alert(`Non-JSON from score API (${res.status}).\n\n${text.slice(0, 300)}`);
-                        return;
-                      }
-
-                      const data = text ? JSON.parse(text) : null;
-
-                      if (!res.ok) {
-                        window.alert(`Score API error (${res.status}): ${data?.error || "unknown"}`);
-                        return;
-                      }
-
-                      // ✅ Update UI immediately (no waiting on /api/profile/me)
-                      setProfile((prev: any) => ({
-                        ...(prev ?? {}),
-                        gamer_score_v11: data?.score_total ?? prev?.gamer_score_v11 ?? null,
-                        gamer_score_v11_confidence: data?.confidence ?? prev?.gamer_score_v11_confidence ?? null,
-                        gamer_score_v11_breakdown: data ?? prev?.gamer_score_v11_breakdown ?? null,
-                        gamer_score_v11_updated_at: new Date().toISOString(),
-                      }));
-<Link
-  href="/score-methodology"
-  style={{ color: "#2563eb", fontSize: 13, marginTop: 6, display: "inline-block" }}
->
-  What’s this score?
-</Link>
-
-                      // Optional: also refresh from server so it's "truthy"
-                      await loadMe();
-
-                      window.alert(`Updated ✅\nScore: ${data?.score_total}\nConfidence: ${data?.confidence}%`);
-                    } catch (e: any) {
-                      window.alert(`Recalc failed: ${e?.message || e}`);
-                    }
-                  }}
-                  style={{
-                    padding: "8px 12px",
-                    borderRadius: 12,
-                    border: "1px solid #e5e7eb",
-                    background: "white",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                  }}
-                >
-                  Recalculate score
-                </button>
-
-                <Link href="/era-onboarding" style={{ color: "#7c3aed", fontWeight: 900 }}>
-                  Take the Era History quiz →
-                </Link>
-              </div>
-
-              {profile?.gamer_score_v11_breakdown?.explain?.length ? (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ fontWeight: 900, marginBottom: 6 }}>Why is my score this?</div>
-                  <div style={{ display: "grid", gap: 8 }}>
-                    {profile.gamer_score_v11_breakdown.explain.map((x: any, idx: number) => (
-                      <div
-                        key={idx}
-                        style={{
-                          border: "1px solid #e5e7eb",
-                          borderRadius: 12,
-                          padding: 12,
-                          background: "white",
-                        }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                          <div style={{ fontWeight: 900 }}>{x.label}</div>
-                          <div style={{ fontWeight: 900 }}>+{x.points}</div>
-                        </div>
-                        <div style={{ color: "#64748b", marginTop: 4, fontSize: 13 }}>{x.detail}</div>
-                      </div>
-                    ))}
+            {score != null ? (
+              <div style={{ color: "#0f172a" }}>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <div style={{ fontSize: 28, fontWeight: 900, lineHeight: 1 }}>
+                    {score}
                   </div>
-                </div>
-              ) : null}
-            </div>
+                  {conf != null ? (
+                    <div style={{ color: "#64748b", fontSize: 13 }}>
+                      Confidence: {conf}/100
+                    </div>
+                  ) : null}
 
-            <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-              <Link href="/my-portfolio" style={{ color: "#2563eb" }}>
-                My Portfolio →
-              </Link>
-              <Link href="/gamehome" style={{ color: "#2563eb" }}>
-                GameHome →
-              </Link>
-              <button
-                type="button"
-                onClick={refreshAll}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 12,
-                  border: "1px solid #e5e7eb",
-                  background: "white",
-                  fontWeight: 900,
-                  cursor: "pointer",
-                }}
-              >
-                Refresh
-              </button>
-            </div>
+                  <button
+                    type="button"
+                    onClick={runScoreRecalc}
+                    style={{
+                      marginLeft: "auto",
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Recalculate
+                  </button>
+                </div>
+
+                {/* Why */}
+                {breakdown?.explain?.length ? (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontWeight: 900, marginBottom: 6, fontSize: 13 }}>
+                      Why is my score this?
+                    </div>
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {breakdown.explain.map((x: any, idx: number) => (
+                        <div
+                          key={idx}
+                          style={{
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 12,
+                            padding: 10,
+                            background: "#f8fafc",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <div style={{ fontWeight: 900 }}>{x.label ?? "Component"}</div>
+                            <div style={{ fontWeight: 900 }}>{x.points ?? 0}</div>
+                          </div>
+                          <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>
+                            {x.detail ?? ""}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ marginTop: 8, color: "#64748b", fontSize: 13 }}>
+                    Recalculate to generate a breakdown.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ color: "#64748b", fontSize: 13 }}>
+                No score yet. Connect platforms and recalculate.
+              </div>
+            )}
           </div>
 
           {/* Steam */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
+          <div style={{ marginTop: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Steam</div>
 
             {profile?.steam_id ? (
@@ -364,12 +231,30 @@ export default function ProfilePage() {
                     Last synced: {new Date(profile.steam_last_synced_at).toLocaleString()} •{" "}
                     {profile.steam_last_sync_count ?? 0} games
                   </div>
-                ) : null}
+                ) : (
+                  <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
+                    Not synced yet.
+                  </div>
+                )}
 
-                <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+                <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <Link href="/steam-sync" style={{ color: "#2563eb" }}>
                     Steam Sync →
                   </Link>
+                  <button
+                    type="button"
+                    onClick={() => runSync("/api/sync/steam", "Steam")}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Run Steam Sync
+                  </button>
                 </div>
               </div>
             ) : (
@@ -392,14 +277,7 @@ export default function ProfilePage() {
           </div>
 
           {/* RetroAchievements */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
+          <div style={{ marginTop: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 6 }}>RetroAchievements</div>
 
             {profile?.ra_username ? (
@@ -410,43 +288,22 @@ export default function ProfilePage() {
                 {profile?.ra_last_synced_at ? (
                   <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
                     Last synced: {new Date(profile.ra_last_synced_at).toLocaleString()} •{" "}
-                    {profile.ra_last_sync_count ?? 0} games
+                    {profile.ra_last_sync_count ?? 0} titles
                   </div>
-                ) : null}
+                ) : (
+                  <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
+                    Not synced yet.
+                  </div>
+                )}
 
                 <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <Link href="/retroachievements-connect" style={{ color: "#2563eb" }}>
-                    Update RA creds →
+                    RA Settings →
                   </Link>
-
                   <button
                     type="button"
-                    onClick={async () => {
-                      try {
-                        const res = await fetch("/api/sync/retroachievements", { method: "POST" });
-                        const text = await res.text();
-                        const data = text ? JSON.parse(text) : null;
-
-                        if (!res.ok) {
-                          window.alert(data?.error || `RA Sync failed (${res.status})`);
-                          return;
-                        }
-
-                        window.alert(`RA Sync OK ✅ Imported ${data?.imported ?? 0} games`);
-                        // Optional: recalc score after sync
-                        await fetch("/api/score/v11");
-                        // reload profile to refresh breakdown
-                        // (assuming you already have loadMe() or load())
-                        // @ts-ignore
-                        if (typeof loadMe === "function") await loadMe();
-                        // @ts-ignore
-                        if (typeof load === "function") await load();
-                      } catch (e: any) {
-                        window.alert(e?.message || "RA Sync failed");
-                      }
-                    }}
+                    onClick={() => runSync("/api/sync/retroachievements", "RetroAchievements")}
                     style={{
-                      marginTop: 10,
                       padding: "8px 12px",
                       borderRadius: 12,
                       border: "1px solid #e5e7eb",
@@ -455,66 +312,56 @@ export default function ProfilePage() {
                       cursor: "pointer",
                     }}
                   >
-                    Run RetroAchievements Sync
+                    Run RA Sync
                   </button>
                 </div>
               </div>
             ) : (
-              <div>
-                <Link
-                  href="/retroachievements-connect"
-                  style={{
-                    display: "inline-block",
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    border: "1px solid #e5e7eb",
-                    background: "white",
-                    fontWeight: 900,
-                    textDecoration: "none",
-                    color: "#0f172a",
-                  }}
-                >
-                  Connect RetroAchievements
-                </Link>
-              </div>
+              <Link
+                href="/retroachievements-connect"
+                style={{
+                  display: "inline-block",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid #e5e7eb",
+                  background: "white",
+                  fontWeight: 900,
+                  textDecoration: "none",
+                  color: "#0f172a",
+                }}
+              >
+                Connect RetroAchievements
+              </Link>
             )}
           </div>
 
           {/* PlayStation */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
+          <div style={{ marginTop: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 6 }}>PlayStation</div>
 
-            {profile?.psn_online_id || profile?.psn_npsso ? (
+            {profile?.psn_connected_at ? (
               <div style={{ color: "#0f172a" }}>
-                Connected ✅{" "}
-                {profile?.psn_online_id ? (
-                  <span style={{ color: "#64748b" }}>{profile.psn_online_id}</span>
-                ) : null}
+                Connected ✅
 
                 {profile?.psn_last_synced_at ? (
                   <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
                     Last synced: {new Date(profile.psn_last_synced_at).toLocaleString()} •{" "}
-                    {profile.psn_last_sync_count ?? 0} games
+                    {profile.psn_last_sync_count ?? 0} titles
                   </div>
-                ) : null}
+                ) : (
+                  <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
+                    Not synced yet.
+                  </div>
+                )}
 
                 <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <Link href="/playstation-connect" style={{ color: "#2563eb" }}>
-                    Update PSN creds →
+                    PSN Settings →
                   </Link>
-
                   <button
                     type="button"
-                    onClick={() => postAndAlert("/api/sync/psn")}
+                    onClick={() => runSync("/api/sync/psn", "PlayStation")}
                     style={{
-                      marginTop: 10,
                       padding: "8px 12px",
                       borderRadius: 12,
                       border: "1px solid #e5e7eb",
@@ -525,61 +372,24 @@ export default function ProfilePage() {
                   >
                     Run PSN Sync
                   </button>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        const res = await fetch("/api/psn/import", { method: "POST" });
-                        const text = await res.text();
-                        const data = text ? JSON.parse(text) : null;
-
-                        if (!res.ok) {
-                          window.alert(`Import failed (${res.status})\n\n${text}`);
-                          return;
-                        }
-
-                        window.alert(
-                          `PSN Import OK ✅\n\nImported: ${data.imported}\nUpdated: ${data.updated}\nMatched: ${data.matched}\nTotal PSN titles: ${data.total}\n\nCreated games: ${data.created_games}\nCreated PSN releases: ${data.created_releases}`
-                        );
-
-                        // reload your profile page state if you want
-                        // e.g. await loadMe();
-                      } catch (e: any) {
-                        window.alert(`Import error: ${e?.message || e}`);
-                      }
-                    }}
-                    style={{
-                      padding: "8px 12px",
-                      borderRadius: 12,
-                      border: "1px solid #e5e7eb",
-                      background: "white",
-                      fontWeight: 900,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Import PSN Titles → Library
-                  </button>
                 </div>
               </div>
             ) : (
-              <div>
-                <Link
-                  href="/playstation-connect"
-                  style={{
-                    display: "inline-block",
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    border: "1px solid #e5e7eb",
-                    background: "white",
-                    fontWeight: 900,
-                    textDecoration: "none",
-                    color: "#0f172a",
-                  }}
-                >
-                  Connect PlayStation
-                </Link>
-              </div>
+              <Link
+                href="/playstation-connect"
+                style={{
+                  display: "inline-block",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid #e5e7eb",
+                  background: "white",
+                  fontWeight: 900,
+                  textDecoration: "none",
+                  color: "#0f172a",
+                }}
+              >
+                Connect PlayStation
+              </Link>
             )}
           </div>
 
@@ -606,29 +416,12 @@ export default function ProfilePage() {
                 )}
 
                 <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <Link href="/xbox-connect" style={{ color: "#2563eb" }}>
+                    Xbox Settings →
+                  </Link>
                   <button
                     type="button"
-                    onClick={async () => {
-                      try {
-                        const res = await fetch("/api/sync/xbox", { method: "POST" });
-                        const text = await res.text();
-                        const data = text ? JSON.parse(text) : null;
-
-                        if (!res.ok) {
-                          window.alert(`Xbox sync failed (${res.status}): ${data?.error || text}`);
-                          return;
-                        }
-
-                        window.alert(
-                          `Xbox sync OK ✅\nImported: ${data?.imported ?? 0}\nUpdated: ${data?.updated ?? 0}\nTotal: ${data?.total ?? 0}`
-                        );
-
-                        // re-fetch profile to display last synced stamp
-                        await loadMe();
-                      } catch (e: any) {
-                        window.alert(`Xbox sync error: ${e?.message || e}`);
-                      }
-                    }}
+                    onClick={() => runSync("/api/sync/xbox", "Xbox")}
                     style={{
                       padding: "8px 12px",
                       borderRadius: 12,
@@ -643,7 +436,7 @@ export default function ProfilePage() {
                 </div>
               </div>
             ) : (
-              <a
+              <Link
                 href="/xbox-connect"
                 style={{
                   display: "inline-block",
@@ -657,7 +450,7 @@ export default function ProfilePage() {
                 }}
               >
                 Connect Xbox
-              </a>
+              </Link>
             )}
           </div>
         </div>
