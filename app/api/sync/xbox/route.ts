@@ -2,266 +2,15 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 
-type XboxTitleRow = {
-  titleId: number;
-  name: string;
-  lastTimePlayed?: string; // ISO-ish
-  minutesPlayed?: number;  // sometimes present, sometimes not
-};
-
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
-}
-
 function slugPlatformKey() {
   return "xbox";
 }
 
-/**
- * Microsoft OAuth refresh (for user access tokens)
- */
-async function refreshMicrosoftToken(opts: {
-  tenant: string; // usually "consumers" or "common"
-  clientId: string;
-  clientSecret: string;
-  refreshToken: string;
-  redirectUri: string;
-}) {
-  const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(
-    opts.tenant
-  )}/oauth2/v2.0/token`;
-
-  const body = new URLSearchParams({
-    client_id: opts.clientId,
-    client_secret: opts.clientSecret,
-    grant_type: "refresh_token",
-    refresh_token: opts.refreshToken,
-    redirect_uri: opts.redirectUri,
-    scope: "XboxLive.signin offline_access",
-  });
-
-  const res = await fetch(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-    cache: "no-store",
-  });
-
-  const json = await res.json().catch(() => null);
-  if (!res.ok) {
-    throw new Error(
-      `MS refresh failed (${res.status}): ${JSON.stringify(json)}`
-    );
-  }
-
-  return {
-    access_token: String(json?.access_token || ""),
-    refresh_token: String(json?.refresh_token || opts.refreshToken),
-    expires_in: Number(json?.expires_in || 3600),
-  };
+function clampTitle(s: string) {
+  return (s || "").trim().slice(0, 220);
 }
 
-/**
- * Exchange Microsoft OAuth access token -> Xbox User token + XSTS token
- */
-async function getXstsFromMicrosoftAccessToken(msAccessToken: string) {
-  // 1) user token (XBL) using RPS ticket "d=<ms_access_token>"
-  const userAuthRes = await fetch("https://user.auth.xboxlive.com/user/authenticate", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-    },
-    body: JSON.stringify({
-      Properties: {
-        AuthMethod: "RPS",
-        SiteName: "user.auth.xboxlive.com",
-        RpsTicket: `d=${msAccessToken}`,
-      },
-      RelyingParty: "http://auth.xboxlive.com",
-      TokenType: "JWT",
-    }),
-    cache: "no-store",
-  });
-
-  const userAuthJson = await userAuthRes.json().catch(() => null);
-  if (!userAuthRes.ok) {
-    throw new Error(
-      `XBL user token failed (${userAuthRes.status}): ${JSON.stringify(userAuthJson)}`
-    );
-  }
-
-  const userToken = String(userAuthJson?.Token || "");
-  const uhs = String(userAuthJson?.DisplayClaims?.xui?.[0]?.uhs || "");
-  if (!userToken || !uhs) {
-    throw new Error("XBL user token missing Token/uhs");
-  }
-
-  // 2) XSTS token
-  const xstsRes = await fetch("https://xsts.auth.xboxlive.com/xsts/authorize", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-    },
-    body: JSON.stringify({
-      Properties: {
-        SandboxId: "RETAIL",
-        UserTokens: [userToken],
-      },
-      RelyingParty: "http://xboxlive.com",
-      TokenType: "JWT",
-    }),
-    cache: "no-store",
-  });
-
-  const xstsJson = await xstsRes.json().catch(() => null);
-  if (!xstsRes.ok) {
-    throw new Error(
-      `XSTS failed (${xstsRes.status}): ${JSON.stringify(xstsJson)}`
-    );
-  }
-
-  const xstsToken = String(xstsJson?.Token || "");
-  const xuid = String(xstsJson?.DisplayClaims?.xui?.[0]?.xid || "");
-  if (!xstsToken || !xuid) {
-    throw new Error("XSTS missing Token/xuid");
-  }
-
-  // Authorization header format used by Xbox endpoints:
-  // XBL3.0 x=<uhs>;<xstsToken>
-  const xblAuth = `XBL3.0 x=${uhs};${xstsToken}`;
-
-  return { xblAuth, xuid };
-}
-
-/**
- * Fetch “title history” (recent titles played).
- * This endpoint commonly works for “recently played”.
- * Playtime minutes availability varies by title/account.
- */
-async function fetchXboxTitleHistory(xblAuth: string, xuid: string): Promise<XboxTitleRow[]> {
-  const url =
-    `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(
-      xuid
-    )})/titles/titlehistory/decoration/detail`;
-
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: xblAuth,
-      "x-xbl-contract-version": "2",
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
-
-  const json = await res.json().catch(() => null);
-  if (!res.ok) {
-    throw new Error(
-      `Title history failed (${res.status}): ${JSON.stringify(json)}`
-    );
-  }
-
-  const titles = Array.isArray(json?.titles) ? json.titles : [];
-  // Normalize minimal fields
-  return titles
-    .map((t: any) => {
-      const titleId = Number(t?.titleId || 0);
-      const name = String(t?.name || "").trim();
-      if (!titleId || !name) return null;
-
-      // Some payloads include titleHistory object; fields vary.
-      const lastTimePlayed =
-        t?.titleHistory?.lastTimePlayed ||
-        t?.titleHistory?.lastTimePlayedUtc ||
-        t?.titleHistory?.lastPlayed ||
-        null;
-
-      // Some payloads include minutesPlayed (rare) or stats-like fields.
-      const minutesPlayed =
-        typeof t?.titleHistory?.minutesPlayed === "number"
-          ? t.titleHistory.minutesPlayed
-          : (typeof t?.titleHistory?.totalMinutesPlayed === "number"
-              ? t.titleHistory.totalMinutesPlayed
-              : null);
-
-      return {
-        titleId,
-        name,
-        lastTimePlayed: lastTimePlayed ? String(lastTimePlayed) : undefined,
-        minutesPlayed: minutesPlayed != null ? Number(minutesPlayed) : undefined,
-      } as XboxTitleRow;
-    })
-    .filter(Boolean);
-}
-
-/**
- * Catalog helpers: reuse existing games/releases when possible.
- */
-async function getOrCreateGameAndRelease(opts: {
-  supabaseAdmin: any;
-  title: string;
-  xboxTitleId: number;
-}) {
-  const { supabaseAdmin, title, xboxTitleId } = opts;
-
-  // A) See if release already exists by xbox_title_id
-  const { data: existingRelease } = await supabaseAdmin
-    .from("releases")
-    .select("id, game_id")
-    .eq("xbox_title_id", xboxTitleId)
-    .maybeSingle();
-
-  if (existingRelease?.id && existingRelease?.game_id) {
-    return { releaseId: existingRelease.id as string, gameId: existingRelease.game_id as string, created: false };
-  }
-
-  // B) Find game by canonical_title (you have a UNIQUE constraint here)
-  let gameId: string | null = null;
-
-  const { data: existingGame } = await supabaseAdmin
-    .from("games")
-    .select("id")
-    .eq("canonical_title", title)
-    .maybeSingle();
-
-  if (existingGame?.id) {
-    gameId = existingGame.id;
-  } else {
-    const { data: newGame, error: gErr } = await supabaseAdmin
-      .from("games")
-      .insert({ canonical_title: title })
-      .select("id")
-      .single();
-
-    if (gErr || !newGame?.id) {
-      throw new Error(`Failed to insert game for ${title}: ${gErr?.message || "unknown"}`);
-    }
-    gameId = newGame.id;
-  }
-
-  // C) Create release
-  const { data: newRelease, error: rErr } = await supabaseAdmin
-    .from("releases")
-    .insert({
-      game_id: gameId,
-      display_title: title,
-      platform_name: "Xbox",
-      platform_key: slugPlatformKey(),
-      xbox_title_id: xboxTitleId, // requires this column in releases (see note below)
-    })
-    .select("id")
-    .single();
-
-  if (rErr || !newRelease?.id) {
-    throw new Error(`Failed to insert release for ${title}: ${rErr?.message || "unknown"}`);
-  }
-
-  return { releaseId: newRelease.id as string, gameId: gameId as string, created: true };
-}
-
-export async function POST(req: Request) {
+export async function POST() {
   try {
     const supabaseUser = await supabaseRouteClient();
     const { data: userRes, error: userErr } = await supabaseUser.auth.getUser();
@@ -271,197 +20,185 @@ export async function POST(req: Request) {
     }
     const user = userRes.user;
 
-    // Pull Xbox tokens from profiles
-    const { data: profile, error: pErr } = await supabaseUser
-      .from("profiles")
-      .select(
-        "xbox_access_token, xbox_refresh_token, xbox_token_expires_at"
-      )
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
-
-    let accessToken = String(profile?.xbox_access_token || "");
-    const refreshToken = String(profile?.xbox_refresh_token || "");
-    const expiresAt = profile?.xbox_token_expires_at ? new Date(profile.xbox_token_expires_at).getTime() : 0;
-
-    if (!accessToken) {
-      return NextResponse.json({ error: "Xbox not connected (missing access token)" }, { status: 400 });
-    }
-
-    // If expired or expiring soon, refresh
-    const now = Date.now();
-    const isExpired = expiresAt && now > (expiresAt - 60_000); // 1 min grace
-    if (isExpired) {
-      const clientId = process.env.XBOX_CLIENT_ID || "";
-      const clientSecret = process.env.XBOX_CLIENT_SECRET || "";
-      const redirectUri = process.env.XBOX_REDIRECT_URI || "";
-
-      if (!clientId || !clientSecret || !redirectUri || !refreshToken) {
-        return NextResponse.json(
-          { error: "Missing Xbox refresh config (client id/secret/redirect/refresh token)" },
-          { status: 500 }
-        );
-      }
-
-      const tenant = process.env.XBOX_TENANT || "consumers";
-      const refreshed = await refreshMicrosoftToken({
-        tenant,
-        clientId,
-        clientSecret,
-        refreshToken,
-        redirectUri,
-      });
-
-      accessToken = refreshed.access_token;
-
-      // Save refreshed tokens
-      const newExpiresAt = new Date(Date.now() + refreshed.expires_in * 1000).toISOString();
-      await supabaseUser
-        .from("profiles")
-        .update({
-          xbox_access_token: refreshed.access_token,
-          xbox_refresh_token: refreshed.refresh_token,
-          xbox_token_expires_at: newExpiresAt,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("user_id", user.id);
-    }
-
-    // 1) Convert MS OAuth token -> XSTS + XUID
-    const { xblAuth, xuid } = await getXstsFromMicrosoftAccessToken(accessToken);
-
-    // 2) Fetch title history
-    const titles = await fetchXboxTitleHistory(xblAuth, xuid);
-
-    // 3) Admin client (catalog writes)
+    // Service role client for catalog writes
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
+    // 1) Pull xbox titles we already ingested
+    // Expecting xbox_title_progress columns like: user_id, title_id, title_name, last_played_at?, playtime_minutes?
+    const { data: titles, error: tErr } = await supabaseUser
+      .from("xbox_title_progress")
+      .select("*")
+      .eq("user_id", user.id);
+
+    if (tErr) return NextResponse.json({ error: tErr.message }, { status: 500 });
+
+    const rows = Array.isArray(titles) ? titles : [];
+    if (rows.length === 0) {
+      return NextResponse.json({ ok: true, imported: 0, updated: 0, total: 0, note: "No xbox titles found to map." });
+    }
+
     let imported = 0;
     let updated = 0;
 
-    // 4) Process titles
-    for (const t of titles) {
-      const title = (t.name || "").trim();
-      const xboxTitleId = Number(t.titleId || 0);
-      if (!title || !xboxTitleId) continue;
+    for (const x of rows) {
+      const xboxTitleId = String(x.title_id ?? x.xbox_title_id ?? "").trim();
+      const title = clampTitle(String(x.title_name ?? x.name ?? `Xbox Title ${xboxTitleId || "Unknown"}`));
 
-      // A) Ensure catalog rows exist
-      const { releaseId, created } = await getOrCreateGameAndRelease({
-        supabaseAdmin,
-        title,
-        xboxTitleId,
-      });
+      if (!title) continue;
 
-      if (created) imported += 1;
-      else updated += 1;
+      // Use whatever you have available; OK if null.
+      const playtimeMinutes = Number(x.playtime_minutes ?? x.playtime_forever_minutes ?? 0) || 0;
+      const lastPlayedAt =
+        x.last_played_at ? new Date(x.last_played_at).toISOString() : null;
 
-      // B) Upsert xbox_title_progress
-      const minutesPlayed =
-        t.minutesPlayed != null ? clamp(Number(t.minutesPlayed), 0, 10_000_000) : null;
+      // 2) Find existing release for this xbox title id (if you store one)
+      // If you DON'T have a dedicated column, we'll match by title + platform.
+      // Prefer exact ID match if you have it.
+      let releaseId: string | null = null;
 
-      const lastPlayed =
-        t.lastTimePlayed ? new Date(t.lastTimePlayed).toISOString() : null;
+      if (xboxTitleId) {
+        const { data: relById } = await supabaseAdmin
+          .from("releases")
+          .select("id")
+          .eq("platform_key", slugPlatformKey())
+          .eq("xbox_title_id", xboxTitleId)
+          .maybeSingle();
 
-      await supabaseAdmin
-        .from("xbox_title_progress")
-        .upsert(
-          {
-            user_id: user.id,
-            xbox_title_id: String(xboxTitleId),
-            title_name: title,
-            title_platform: "Xbox",
-            minutes_played: minutesPlayed,
-            last_played_at: lastPlayed,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "user_id,xbox_title_id" }
-        );
+        releaseId = relById?.id ?? null;
+      }
 
-      // C) Upsert into portfolio_entries (do NOT stomp user choices)
+      // 3) Create game + release if missing
+      if (!releaseId) {
+        // A) upsert game by canonical_title (your schema has unique canonical_title)
+        const { data: existingGame } = await supabaseAdmin
+          .from("games")
+          .select("id")
+          .eq("canonical_title", title)
+          .maybeSingle();
+
+        let gameId = existingGame?.id ?? null;
+
+        if (!gameId) {
+          const { data: newGame, error: gErr } = await supabaseAdmin
+            .from("games")
+            .insert({ canonical_title: title })
+            .select("id")
+            .single();
+
+          if (gErr || !newGame?.id) {
+            // if insert failed because of a race, re-fetch
+            const { data: fallbackGame } = await supabaseAdmin
+              .from("games")
+              .select("id")
+              .eq("canonical_title", title)
+              .maybeSingle();
+
+            if (!fallbackGame?.id) {
+              return NextResponse.json({ error: `Failed to insert game for ${title}: ${gErr?.message || "unknown"}` }, { status: 500 });
+            }
+            gameId = fallbackGame.id;
+          } else {
+            gameId = newGame.id;
+          }
+        }
+
+        // B) insert release
+        const insertPayload: any = {
+          game_id: gameId,
+          display_title: title,
+          platform_name: "Xbox",
+          platform_key: slugPlatformKey(),
+        };
+
+        // If you added xbox_title_id column on releases, store it.
+        if (xboxTitleId) insertPayload.xbox_title_id = xboxTitleId;
+
+        const { data: newRel, error: rErr } = await supabaseAdmin
+          .from("releases")
+          .insert(insertPayload)
+          .select("id")
+          .single();
+
+        if (rErr || !newRel?.id) {
+          return NextResponse.json({ error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` }, { status: 500 });
+        }
+
+        releaseId = newRel.id;
+        imported += 1;
+      } else {
+        updated += 1;
+      }
+
+      // 4) Upsert into portfolio_entries WITHOUT clobbering manual status/rating
       const { data: existingEntry, error: exErr } = await supabaseUser
         .from("portfolio_entries")
-        .select("status, playtime_minutes, last_played_at")
+        .select("user_id, release_id, status, rating, playtime_minutes, last_played_at")
         .eq("user_id", user.id)
         .eq("release_id", releaseId)
         .maybeSingle();
 
       if (exErr) {
-        return NextResponse.json(
-          { error: `Failed to check portfolio entry for ${title}: ${exErr.message}` },
-          { status: 500 }
-        );
+        return NextResponse.json({ error: `Failed checking portfolio entry for ${title}: ${exErr.message}` }, { status: 500 });
       }
 
-      const incomingPlaytimeMinutes =
-        minutesPlayed != null ? minutesPlayed : 0;
-
-      const incomingLastPlayed =
-        lastPlayed ? lastPlayed : null;
-
       if (!existingEntry) {
-        const { error: insErr } = await supabaseUser
-          .from("portfolio_entries")
-          .insert({
-            user_id: user.id,
-            release_id: releaseId,
-            status: "owned",
-            playtime_minutes: incomingPlaytimeMinutes,
-            last_played_at: incomingLastPlayed,
-            updated_at: new Date().toISOString(),
-          });
+        const { error: insErr } = await supabaseUser.from("portfolio_entries").insert({
+          user_id: user.id,
+          release_id: releaseId,
+          status: "owned",
+          playtime_minutes: playtimeMinutes,
+          last_played_at: lastPlayedAt,
+          updated_at: new Date().toISOString(),
+        });
 
         if (insErr) {
-          return NextResponse.json(
-            { error: `Failed to insert portfolio entry for ${title}: ${insErr.message}` },
-            { status: 500 }
-          );
+          return NextResponse.json({ error: `Failed to insert portfolio entry for ${title}: ${insErr.message}` }, { status: 500 });
         }
       } else {
-        const currentPlaytime = Number(existingEntry.playtime_minutes || 0);
-        const nextPlaytime = Math.max(currentPlaytime, incomingPlaytimeMinutes);
+        const currentPlay = Number(existingEntry.playtime_minutes || 0);
+        const nextPlay = Math.max(currentPlay, playtimeMinutes);
 
-        let nextLastPlayed = existingEntry.last_played_at as string | null;
-        if (incomingLastPlayed) {
-          if (!nextLastPlayed || new Date(incomingLastPlayed) > new Date(nextLastPlayed)) {
-            nextLastPlayed = incomingLastPlayed;
-          }
+        let nextLast = existingEntry.last_played_at as string | null;
+        if (lastPlayedAt) {
+          if (!nextLast || new Date(lastPlayedAt) > new Date(nextLast)) nextLast = lastPlayedAt;
         }
 
-        await supabaseUser
+        const patch: any = {
+          playtime_minutes: nextPlay,
+          last_played_at: nextLast,
+          updated_at: new Date().toISOString(),
+        };
+
+        const { error: updErr } = await supabaseUser
           .from("portfolio_entries")
-          .update({
-            playtime_minutes: nextPlaytime,
-            last_played_at: nextLastPlayed,
-            updated_at: new Date().toISOString(),
-          })
+          .update(patch)
           .eq("user_id", user.id)
           .eq("release_id", releaseId);
+
+        if (updErr) {
+          return NextResponse.json({ error: `Failed to update portfolio entry for ${title}: ${updErr.message}` }, { status: 500 });
+        }
       }
     }
 
-    // Stamp profile
-    await supabaseUser
+    // 5) Stamp profile sync time
+    const { error: profErr } = await supabaseUser
       .from("profiles")
       .update({
         xbox_last_synced_at: new Date().toISOString(),
-        xbox_last_sync_count: titles.length,
+        xbox_last_sync_count: rows.length,
         updated_at: new Date().toISOString(),
       })
       .eq("user_id", user.id);
 
-    return NextResponse.json({
-      ok: true,
-      imported,
-      updated,
-      total: titles.length,
-      note:
-        "Playtime minutes may be missing for some titles depending on Xbox data availability. We still import titles + last played.",
-    });
+    if (profErr) {
+      return NextResponse.json({ error: `Failed to update profile: ${profErr.message}` }, { status: 500 });
+    }
+
+    return NextResponse.json({ ok: true, imported, updated, total: rows.length });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Xbox sync failed" }, { status: 500 });
   }

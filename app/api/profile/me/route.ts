@@ -16,8 +16,8 @@ export async function GET() {
     .select(`
       steam_id, steam_connected_at, steam_last_synced_at, steam_last_sync_count,
       ra_username, ra_connected_at, ra_last_synced_at, ra_last_sync_count,
-      psn_online_id, psn_npsso, psn_connected_at, psn_last_synced_at, psn_last_sync_count,
-      xbox_connected_at, xbox_xbl_key,
+      psn_connected_at, psn_last_synced_at, psn_last_sync_count,
+      xbox_connected_at, xbox_last_synced_at, xbox_last_sync_count, xbox_xuid,
       gamer_score_v11, gamer_score_v11_confidence, gamer_score_v11_breakdown, gamer_score_v11_updated_at
     `)
     .eq("user_id", user.id)

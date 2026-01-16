@@ -584,26 +584,67 @@ export default function ProfilePage() {
           </div>
 
           {/* Xbox */}
-          <div
-            style={{
-              border: "1px solid #e5e7eb",
-              borderRadius: 14,
-              padding: 14,
-              background: "white",
-            }}
-          >
+          <div style={{ marginTop: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Xbox</div>
 
-            {profile?.xbox_connected_at ? (
+            {profile?.xbox_connected_at || profile?.xbox_xuid ? (
               <div style={{ color: "#0f172a" }}>
-                Connected ✅
-                <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
-                  Connected at: {new Date(profile.xbox_connected_at).toLocaleString()}
+                Connected ✅{" "}
+                <span style={{ color: "#64748b" }}>
+                  {profile?.xbox_xuid ? `xuid ${profile.xbox_xuid}` : ""}
+                </span>
+
+                {profile?.xbox_last_synced_at ? (
+                  <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
+                    Last synced: {new Date(profile.xbox_last_synced_at).toLocaleString()} •{" "}
+                    {profile.xbox_last_sync_count ?? 0} titles
+                  </div>
+                ) : (
+                  <div style={{ color: "#64748b", marginTop: 6, fontSize: 13 }}>
+                    Not synced yet.
+                  </div>
+                )}
+
+                <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/sync/xbox", { method: "POST" });
+                        const text = await res.text();
+                        const data = text ? JSON.parse(text) : null;
+
+                        if (!res.ok) {
+                          window.alert(`Xbox sync failed (${res.status}): ${data?.error || text}`);
+                          return;
+                        }
+
+                        window.alert(
+                          `Xbox sync OK ✅\nImported: ${data?.imported ?? 0}\nUpdated: ${data?.updated ?? 0}\nTotal: ${data?.total ?? 0}`
+                        );
+
+                        // re-fetch profile to display last synced stamp
+                        await loadMe();
+                      } catch (e: any) {
+                        window.alert(`Xbox sync error: ${e?.message || e}`);
+                      }
+                    }}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Run Xbox Sync
+                  </button>
                 </div>
               </div>
             ) : (
               <a
-                href="/api/auth/xbox/start"
+                href="/xbox-connect"
                 style={{
                   display: "inline-block",
                   padding: "10px 12px",
