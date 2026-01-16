@@ -112,6 +112,53 @@ export async function GET() {
     }
   }
 
+  // 2.6) Xbox (playtime + optional achievement signal)
+  // IMPORTANT: we select "*" so we don't crash if your column names differ.
+  const { data: xboxRows, error: xbErr } = await supabase
+    .from("xbox_title_progress")
+    .select("*")
+    .eq("user_id", user.id);
+
+  if (xbErr) return NextResponse.json({ error: xbErr.message }, { status: 500 });
+
+  const xb = Array.isArray(xboxRows) ? xboxRows : [];
+
+  // Helper: read the first existing numeric field from a list of possible column names
+  function numFromAny(obj: any, keys: string[]) {
+    for (const k of keys) {
+      const v = obj?.[k];
+      if (v !== undefined && v !== null && v !== "") {
+        const n = Number(v);
+        if (!Number.isNaN(n)) return n;
+      }
+    }
+    return 0;
+  }
+
+  let xboxPlaytimeMinutes = 0;
+  let xboxAchSignalRaw = 0;
+  let xboxTitles = xb.length;
+
+  for (const t of xb) {
+    // Try common playtime column names. Add yours here if needed.
+    const minutes = numFromAny(t, [
+      "playtime_minutes",
+      "minutes_played",
+      "time_played_minutes",
+      "total_playtime_minutes",
+      "playtime",
+      "minutes",
+    ]);
+
+    xboxPlaytimeMinutes += minutes;
+
+    // Optional: achievement signal if your table has these (or similar) columns
+    const earned = numFromAny(t, ["achievements_earned", "achievement_earned", "earned_achievements"]);
+    const total = numFromAny(t, ["achievements_total", "achievement_total", "total_achievements"]);
+
+    if (total > 0) xboxAchSignalRaw += earned / total;
+  }
+
   // 4) Era bonuses (magic onboarding)
   const { data: eraRow } = await supabase
     .from("user_era_history")
@@ -135,6 +182,10 @@ export async function GET() {
   // Optional small trophy seasoning: at most +120 (academic-lite, not “trophy sweats win”)
   const psnTrophiesComponent = Math.round(90 * Math.log1p(Math.max(0, psnTrophySignal) / 40));
 
+  // Xbox: match PSN style (log-scaled playtime)
+  const xboxComponent = logScaled(xboxPlaytimeMinutes);
+  const xboxAchComponent = Math.round(120 * Math.log1p(Math.max(0, xboxAchSignalRaw))); // soft
+
   // Total score
   const score =
     steamComponent +
@@ -142,6 +193,8 @@ export async function GET() {
     raComponent +
     psnPlaytimeComponent +
     psnTrophiesComponent +
+    xboxComponent +
+    xboxAchComponent +
     eraBonus;
 
   // 6) Confidence
@@ -159,6 +212,10 @@ export async function GET() {
   if (psnTitles >= 30) confidence += 6;
   if (psnPlaytimeMinutes >= 60 * 10) confidence += 4;
 
+  if (xboxTitles >= 10) confidence += 6;
+  if (xboxTitles >= 30) confidence += 6;
+  if (xboxPlaytimeMinutes >= 60 * 10) confidence += 4;
+
   if ((eraRow as any)?.eras && Array.isArray((eraRow as any).eras) && (eraRow as any).eras.length > 0) {
     confidence += 10;
   }
@@ -175,6 +232,8 @@ export async function GET() {
       retroachievements: raComponent,
       psn_playtime: psnPlaytimeComponent,
       psn_trophies: psnTrophiesComponent,
+      xbox_playtime: xboxComponent,
+      xbox_achievements: xboxAchComponent,
       era_bonus: eraBonus,
     },
     stats: {
@@ -187,6 +246,9 @@ export async function GET() {
       psn_titles: psnTitles,
       psn_playtime_minutes: psnPlaytimeMinutes,
       psn_trophy_signal_raw: psnTrophySignal,
+      xbox_titles: xboxTitles,
+      xbox_playtime_minutes: xboxPlaytimeMinutes,
+      xbox_achievement_signal_raw: xboxAchSignalRaw,
     },
     explain: [
       {
@@ -216,6 +278,16 @@ export async function GET() {
           psn.some((x) => x.trophy_progress != null)
             ? `Trophy progress contributes a light "completion signal" across titles.`
             : `Trophy progress not available yet — we'll enrich this with an additional PSN call.`,
+      },
+      {
+        label: "Xbox playtime",
+        points: xboxComponent,
+        detail: `${Math.round(xboxPlaytimeMinutes / 60)}h total Xbox playtime (log-scaled).`,
+      },
+      {
+        label: "Xbox achievements",
+        points: xboxAchComponent,
+        detail: `Achievement progress contributes a light completion signal (when available per title).`,
       },
       {
         label: "Era history bonus",
