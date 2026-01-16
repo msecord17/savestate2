@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "../../../../lib/supabase/route-client";
 
-// Minimal shapes
 type XboxTitle = {
   name: string;
   titleId?: string;
@@ -10,51 +10,62 @@ type XboxTitle = {
   devices?: string[];
 };
 
-function guessPlatformKeyFromDevices(devices?: string[]) {
-  const d = (devices || []).map((x) => String(x).toLowerCase());
-  if (d.some((x) => x.includes("xboxone"))) return "xbox_one";
-  if (d.some((x) => x.includes("scarlett") || x.includes("xboxseries"))) return "xbox_series";
-  if (d.some((x) => x.includes("xbox360"))) return "xbox_360";
+function slugPlatformKey() {
   return "xbox";
 }
 
-export async function POST() {
+export async function POST(req: Request) {
   try {
-    // 1) User session
+    // 1) Must be logged in (this is the "real" user request)
     const supabaseUser = await supabaseRouteClient();
     const { data: userRes, error: userErr } = await supabaseUser.auth.getUser();
+
     if (userErr || !userRes?.user) {
       return NextResponse.json({ error: "Not logged in" }, { status: 401 });
     }
     const user = userRes.user;
 
-    // 2) Read tokens we saved during callback
-    const { data: profile, error: pErr } = await supabaseUser
-      .from("profiles")
-      .select("xbox_access_token, xbox_refresh_token, xbox_connected_at")
-      .eq("user_id", user.id)
-      .maybeSingle();
+    // 2) Call our internal titles endpoint BUT forward cookies so it remains "logged in"
+    const h = await headers();
+    const cookie = h.get("cookie") ?? "";
 
-    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
-    if (!profile?.xbox_connected_at) {
-      return NextResponse.json({ error: "Xbox not connected" }, { status: 400 });
-    }
+    const origin = new URL(req.url).origin; // ✅ always correct in Vercel + local
+    const titlesRes = await fetch(`${origin}/api/xbox/titles`, {
+      method: "GET",
+      headers: {
+        cookie, // ✅ critical
+        accept: "application/json",
+      },
+      cache: "no-store",
+    });
 
-    let accessToken = String(profile?.xbox_access_token || "").trim();
-    const refreshToken = String(profile?.xbox_refresh_token || "").trim();
-
-    if (!accessToken) {
-      return NextResponse.json({ error: "Missing Xbox access token" }, { status: 400 });
-    }
-
-    // Pull titles from our internal endpoint (which does XSTS + title history)
-    const origin = process.env.NEXT_PUBLIC_SITE_URL
-      ? process.env.NEXT_PUBLIC_SITE_URL
-      : (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
-
-    const titlesRes = await fetch(`${origin}/api/sync/xbox/titles`, { cache: "no-store" });
     const titlesText = await titlesRes.text();
-    const titlesJson = titlesText ? JSON.parse(titlesText) : null;
+
+    // Helpful error if we got HTML back
+    if (titlesText.trim().startsWith("<")) {
+      return NextResponse.json(
+        {
+          error: `Xbox titles returned HTML (status ${titlesRes.status}). This almost always means auth cookies weren't applied or you hit a redirect.`,
+          status: titlesRes.status,
+          html_snippet: titlesText.slice(0, 200),
+        },
+        { status: 500 }
+      );
+    }
+
+    let titlesJson: any = null;
+    try {
+      titlesJson = titlesText ? JSON.parse(titlesText) : null;
+    } catch {
+      return NextResponse.json(
+        {
+          error: `Xbox titles returned non-JSON (status ${titlesRes.status}).`,
+          status: titlesRes.status,
+          snippet: titlesText.slice(0, 200),
+        },
+        { status: 500 }
+      );
+    }
 
     if (!titlesRes.ok) {
       return NextResponse.json(
@@ -64,8 +75,11 @@ export async function POST() {
     }
 
     const titles: XboxTitle[] = Array.isArray(titlesJson?.titles) ? titlesJson.titles : [];
+    const xuid = titlesJson?.xuid ?? null;
+    const gamertag = titlesJson?.gamertag ?? null;
+    const gamerscore = titlesJson?.gamerscore ?? null;
 
-    // 4) Service role client for catalog writes
+    // 3) Admin client for catalog writes (games/releases)
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -75,77 +89,103 @@ export async function POST() {
     let updated = 0;
 
     for (const t of titles) {
-      const titleName = String(t.name || "").trim();
-      if (!titleName) continue;
+      const title = String(t.name || "").trim();
+      if (!title) continue;
 
-      const xboxTitleId = String(t.pfTitleId || t.titleId || "").trim() || null;
-      const platformKey = guessPlatformKeyFromDevices(t.devices);
+      // A) Prefer stable xbox title ids when present
+      const xboxTitleId = (t.titleId || t.pfTitleId || "").toString().trim();
 
-      // A) Find existing game by canonical_title, else create
-      // Avoid unique constraint crash by upserting on canonical_title
-      const { data: gRow, error: gErr } = await supabaseAdmin
-        .from("games")
-        .upsert(
-          { canonical_title: titleName, updated_at: new Date().toISOString() },
-          { onConflict: "canonical_title" }
-        )
-        .select("id")
-        .single();
+      // B) Find existing release by xbox_title_id if you have that column
+      // If you don't have a column yet, we fall back to canonical title matching.
+      let existingRelease: any = null;
 
-      if (gErr || !gRow?.id) {
-        return NextResponse.json({ error: `Failed to upsert game for ${titleName}: ${gErr?.message}` }, { status: 500 });
+      if (xboxTitleId) {
+        const { data } = await supabaseAdmin
+          .from("releases")
+          .select("id, game_id")
+          .eq("xbox_title_id", xboxTitleId)
+          .maybeSingle();
+        existingRelease = data ?? null;
       }
 
-      const gameId = gRow.id;
-
-      // B) Find existing release by xbox_title_id (if you have column) else by (game_id+platform_key)
-      // If you don't have xbox_title_id column, we'll just key off (game/platform).
-      // Adjust if your schema already has xbox_title_id.
-      const { data: relExisting } = await supabaseAdmin
-        .from("releases")
-        .select("id")
-        .eq("game_id", gameId)
-        .eq("platform_key", platformKey)
-        .maybeSingle();
-
-      let releaseId = relExisting?.id ?? null;
-
-      if (!releaseId) {
-        const { data: newRel, error: rErr } = await supabaseAdmin
+      // fallback: title match
+      if (!existingRelease) {
+        const { data } = await supabaseAdmin
           .from("releases")
-          .insert({
-            game_id: gameId,
-            display_title: titleName,
-            platform_name: "Xbox",
-            platform_key: platformKey,
-            // optional if you added a column:
-            // xbox_title_id: xboxTitleId,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
+          .select("id, game_id")
+          .eq("platform_key", slugPlatformKey())
+          .eq("display_title", title)
+          .maybeSingle();
+        existingRelease = data ?? null;
+      }
+
+      let releaseId: string | null = existingRelease?.id ?? null;
+      let gameId: string | null = existingRelease?.game_id ?? null;
+
+      // C) Create if missing: game + release
+      if (!releaseId) {
+        // Upsert game by canonical_title if you have unique constraint on canonical_title
+        const { data: gameRow, error: gErr } = await supabaseAdmin
+          .from("games")
+          .upsert(
+            { canonical_title: title },
+            { onConflict: "canonical_title" }
+          )
           .select("id")
           .single();
 
-        if (rErr || !newRel?.id) {
-          return NextResponse.json({ error: `Failed to insert release for ${titleName}: ${rErr?.message}` }, { status: 500 });
+        if (gErr || !gameRow?.id) {
+          return NextResponse.json(
+            { error: `Failed to upsert game for ${title}: ${gErr?.message || "unknown"}` },
+            { status: 500 }
+          );
         }
 
-        releaseId = newRel.id;
+        gameId = gameRow.id;
+
+        const releaseInsert: any = {
+          game_id: gameId,
+          display_title: title,
+          platform_name: "Xbox",
+          platform_key: slugPlatformKey(),
+          cover_url: null,
+        };
+
+        // only set if your schema has the column
+        if (xboxTitleId) releaseInsert.xbox_title_id = xboxTitleId;
+
+        const { data: newRelease, error: rErr } = await supabaseAdmin
+          .from("releases")
+          .insert(releaseInsert)
+          .select("id")
+          .single();
+
+        if (rErr || !newRelease?.id) {
+          return NextResponse.json(
+            { error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` },
+            { status: 500 }
+          );
+        }
+
+        releaseId = newRelease.id;
         imported += 1;
       } else {
         updated += 1;
       }
 
-      // C) Upsert portfolio entry (status owned) WITHOUT nuking manual edits
+      // D) Add to portfolio_entries (do NOT overwrite manual status)
       const { data: existingEntry, error: exErr } = await supabaseUser
         .from("portfolio_entries")
-        .select("status, playtime_minutes, last_played_at")
+        .select("user_id, release_id")
         .eq("user_id", user.id)
         .eq("release_id", releaseId)
         .maybeSingle();
 
       if (exErr) {
-        return NextResponse.json({ error: `Failed to check portfolio entry for ${titleName}: ${exErr.message}` }, { status: 500 });
+        return NextResponse.json(
+          { error: `Failed to check portfolio entry for ${title}: ${exErr.message}` },
+          { status: 500 }
+        );
       }
 
       if (!existingEntry) {
@@ -155,27 +195,42 @@ export async function POST() {
           status: "owned",
           updated_at: new Date().toISOString(),
         });
+
         if (insErr) {
-          return NextResponse.json({ error: `Failed to insert portfolio entry for ${titleName}: ${insErr.message}` }, { status: 500 });
+          return NextResponse.json(
+            { error: `Failed to insert portfolio entry for ${title}: ${insErr.message}` },
+            { status: 500 }
+          );
         }
       }
     }
 
-    // Stamp sync info
-    const { error: stampErr } = await supabaseUser
+    // 4) Stamp profile
+    const { error: profErr } = await supabaseUser
       .from("profiles")
       .update({
+        xbox_xbl_key: xuid ?? null,
+        xbox_gamerscore: gamerscore ?? null,
+        // achievements count can be added later
         xbox_last_synced_at: new Date().toISOString(),
         xbox_last_sync_count: titles.length,
         updated_at: new Date().toISOString(),
       })
       .eq("user_id", user.id);
 
-    if (stampErr) {
-      return NextResponse.json({ error: `Failed to update profile sync stamp: ${stampErr.message}` }, { status: 500 });
+    if (profErr) {
+      return NextResponse.json({ error: `Failed to update profile stamp: ${profErr.message}` }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true, imported, updated, total: titles.length });
+    return NextResponse.json({
+      ok: true,
+      imported,
+      updated,
+      total: titles.length,
+      xuid,
+      gamertag,
+      gamerscore,
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Xbox sync failed" }, { status: 500 });
   }

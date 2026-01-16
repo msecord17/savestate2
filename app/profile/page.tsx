@@ -452,6 +452,26 @@ export default function ProfilePage() {
                 Connect Xbox
               </Link>
             )}
+            <button
+  type="button"
+  onClick={async () => {
+    const res = await fetch("/api/auth/xbox/disconnect", { method: "POST" });
+    const text = await res.text();
+    if (!res.ok) return alert(`Disconnect failed: ${text}`);
+    alert("Xbox disconnected ✅");
+    await load(); // your existing loadMe/load function
+  }}
+  style={{
+    padding: "8px 12px",
+    borderRadius: 12,
+    border: "1px solid #e5e7eb",
+    background: "white",
+    fontWeight: 900,
+    cursor: "pointer",
+  }}
+>
+  Disconnect Xbox
+</button>
           </div>
         </div>
       )}
