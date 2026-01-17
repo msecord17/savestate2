@@ -6,7 +6,6 @@ function clamp(n: number, lo: number, hi: number) {
 }
 
 function logScaled(minutes: number, weight = 180) {
-  // gentle log curve: 0..∞ minutes -> 0..~1000+
   const h = Math.max(0, minutes) / 60;
   return Math.round(weight * Math.log1p(h));
 }
@@ -19,6 +18,55 @@ const STATUS_POINTS: Record<string, number> = {
   wishlist: 3,
   dropped: 0,
 };
+
+function daysBetween(aIso: string, bIso: string) {
+  const a = new Date(aIso).getTime();
+  const b = new Date(bIso).getTime();
+  return Math.floor(Math.abs(a - b) / (1000 * 60 * 60 * 24));
+}
+
+// Xbox “playtime estimate” per title.
+// Philosophy: we don’t pretend this is real telemetry — it’s a proxy signal.
+// Inputs: achievement % + gamerscore % + recency => minutes estimate.
+// Output is capped so one title can’t explode the total.
+function estimateXboxMinutesForTitle(t: {
+  achievements_earned?: number | null;
+  achievements_total?: number | null;
+  gamerscore_earned?: number | null;
+  gamerscore_total?: number | null;
+  last_played_at?: string | null;
+}) {
+  const ae = Number(t.achievements_earned || 0);
+  const at = Number(t.achievements_total || 0);
+  const ge = Number(t.gamerscore_earned || 0);
+  const gt = Number(t.gamerscore_total || 0);
+
+  const achPct = at > 0 ? clamp(ae / at, 0, 1) : 0;
+  const gsPct = gt > 0 ? clamp(ge / gt, 0, 1) : 0;
+
+  // Base minutes: everybody gets *something* if they touched the title.
+  // Then we scale up with completion-ish signals.
+  let minutes =
+    25 + // “you launched it”
+    220 * achPct + // achievement progress tends to correlate with time
+    260 * gsPct;   // gamerscore progress tends to correlate with time
+
+  // Recency bump: recent play implies more “active time”
+  const lp = t.last_played_at ? new Date(t.last_played_at).toISOString() : null;
+  if (lp) {
+    const d = daysBetween(lp, new Date().toISOString());
+    if (d <= 7) minutes *= 1.55;
+    else if (d <= 30) minutes *= 1.25;
+    else if (d <= 120) minutes *= 1.05;
+  }
+
+  // If we have *any* earned gamerscore but totals are unknown, give a small nudge
+  if (ge > 0 && gt === 0) minutes += 40;
+
+  // Hard caps (per-title)
+  minutes = clamp(minutes, 0, 2200); // max ~36h per title estimate
+  return Math.round(minutes);
+}
 
 export async function GET() {
   const supabase = await supabaseRouteClient();
@@ -42,11 +90,11 @@ export async function GET() {
 
   let totalSteamPlaytimeMinutes = 0;
 
-  for (const r of rows) {
-    const s = String((r as any).status || "owned");
+  for (const r of rows as any[]) {
+    const s = String(r.status || "owned");
     completionPoints += STATUS_POINTS[s] ?? 6;
     if (s === "completed") completedCount += 1;
-    totalSteamPlaytimeMinutes += Number((r as any).playtime_minutes || 0);
+    totalSteamPlaytimeMinutes += Number(r.playtime_minutes || 0);
   }
 
   // 2) RetroAchievements (weighted)
@@ -75,11 +123,11 @@ export async function GET() {
     const pct = clamp(Number(g.percent_complete || 0), 0, 100) / 100;
 
     const base = earned;
-    const hardcore = Math.max(0, earnedHC - earned); // only extra hardcore delta
+    const hardcore = Math.max(0, earnedHC - earned);
     raHardcoreBoost += hardcore;
 
     const weighted = base + 0.65 * hardcore;
-    const withPct = weighted * (0.85 + 0.3 * pct); // 0.85x..1.15x
+    const withPct = weighted * (0.85 + 0.3 * pct);
 
     raPoints += Math.round(withPct);
   }
@@ -95,68 +143,55 @@ export async function GET() {
   const psn = Array.isArray(psnRows) ? psnRows : [];
 
   let psnPlaytimeMinutes = 0;
-  let psnTitles = psn.length;
+  const psnTitles = psn.length;
 
-  let psnTrophySignal = 0; // 0..ish points
-  for (const t of psn) {
+  let psnTrophySignal = 0;
+  for (const t of psn as any[]) {
     psnPlaytimeMinutes += Number(t.playtime_minutes || 0);
 
     const pct =
-      t.trophy_progress != null
-        ? clamp(Number(t.trophy_progress), 0, 100) / 100
-        : null;
+      t.trophy_progress != null ? clamp(Number(t.trophy_progress), 0, 100) / 100 : null;
 
-    // If we have trophy progress, count it; otherwise ignore (we'll improve later)
-    if (pct != null) {
-      psnTrophySignal += Math.round(40 * pct); // 0..40 per title max (gentle)
-    }
+    if (pct != null) psnTrophySignal += Math.round(40 * pct);
   }
 
-  // 2.6) Xbox (playtime + optional achievement signal)
-  // IMPORTANT: we select "*" so we don't crash if your column names differ.
-  // 5) Xbox (achievement + gamerscore signal; playtime not available yet)
-const { data: xboxRows, error: xbErr } = await supabase
-.from("xbox_title_progress")
-.select("achievements_earned, achievements_total, gamerscore_earned, gamerscore_total, last_played_at")
-.eq("user_id", user.id);
+  // 2.6) Xbox (achievement + gamerscore + estimated playtime)
+  const { data: xboxRows, error: xbErr } = await supabase
+    .from("xbox_title_progress")
+    .select("achievements_earned, achievements_total, gamerscore_earned, gamerscore_total, last_played_at")
+    .eq("user_id", user.id);
 
-if (xbErr) return NextResponse.json({ error: xbErr.message }, { status: 500 });
+  if (xbErr) return NextResponse.json({ error: xbErr.message }, { status: 500 });
 
-const xb = Array.isArray(xboxRows) ? xboxRows : [];
+  const xb = Array.isArray(xboxRows) ? xboxRows : [];
+  const xboxTitles = xb.length;
 
-let xboxTitles = xb.length;
-let xboxAchievementsEarned = 0;
-let xboxAchievementsTotal = 0;
-let xboxGamerscoreEarned = 0;
-let xboxGamerscoreTotal = 0;
+  let xboxAchievementsEarned = 0;
+  let xboxAchievementsTotal = 0;
+  let xboxGamerscoreEarned = 0;
+  let xboxGamerscoreTotal = 0;
 
-for (const t of xb as any[]) {
-xboxAchievementsEarned += Number(t.achievements_earned || 0);
-xboxAchievementsTotal += Number(t.achievements_total || 0);
-xboxGamerscoreEarned += Number(t.gamerscore_earned || 0);
-xboxGamerscoreTotal += Number(t.gamerscore_total || 0);
-}
+  let xboxPlaytimeMinutesEstimated = 0;
 
-// Small “completion-ish” signal from achievements + gamerscore completion ratio
-const achPct =
-xboxAchievementsTotal > 0 ? xboxAchievementsEarned / xboxAchievementsTotal : 0;
+  for (const t of xb as any[]) {
+    xboxAchievementsEarned += Number(t.achievements_earned || 0);
+    xboxAchievementsTotal += Number(t.achievements_total || 0);
+    xboxGamerscoreEarned += Number(t.gamerscore_earned || 0);
+    xboxGamerscoreTotal += Number(t.gamerscore_total || 0);
 
-const gsPct =
-xboxGamerscoreTotal > 0 ? xboxGamerscoreEarned / xboxGamerscoreTotal : 0;
+    xboxPlaytimeMinutesEstimated += estimateXboxMinutesForTitle(t);
+  }
 
-// Keep this light so it doesn't dominate (same philosophy as PS trophies)
-const xboxAchievementSignalRaw =
-Math.round(250 * (0.6 * achPct + 0.4 * gsPct)); // 0..250ish
+  const achPct = xboxAchievementsTotal > 0 ? xboxAchievementsEarned / xboxAchievementsTotal : 0;
+  const gsPct = xboxGamerscoreTotal > 0 ? xboxGamerscoreEarned / xboxGamerscoreTotal : 0;
 
-const xboxAchievementComponent =
-Math.round(120 * Math.log1p(Math.max(0, xboxAchievementSignalRaw) / 40));
+  const xboxAchievementSignalRaw = Math.round(250 * (0.6 * achPct + 0.4 * gsPct));
+  const xboxAchievementComponent = Math.round(120 * Math.log1p(Math.max(0, xboxAchievementSignalRaw) / 40));
 
-// No playtime in schema yet
-const xboxPlaytimeMinutes = 0;
-const xboxPlaytimeComponent = 0;
+  // Estimated “playtime” component: lighter than Steam/PSN so it can’t dominate
+  const xboxPlaytimeComponent = logScaled(xboxPlaytimeMinutesEstimated, 120);
 
-
-  // 4) Era bonuses (magic onboarding)
+  // 4) Era bonuses
   const { data: eraRow } = await supabase
     .from("user_era_history")
     .select("era_bonus_points, confidence_bonus, eras")
@@ -170,30 +205,24 @@ const xboxPlaytimeComponent = 0;
   const steamComponent = logScaled(totalSteamPlaytimeMinutes, 180);
   const completionComponent = completionPoints;
 
-  // RA points can be huge; compress so it doesn't dominate
   const raComponent = Math.round(140 * Math.log1p(Math.max(0, raPoints) / 120));
 
-  // PSN: use a slightly lower weight than Steam so multi-platform folks don’t inflate too hard
-  const psnPlaytimeComponent = logScaled(psnPlaytimeMinutes);
-
-  // Optional small trophy seasoning: at most +120 (academic-lite, not “trophy sweats win”)
+  const psnPlaytimeComponent = logScaled(psnPlaytimeMinutes, 180);
   const psnTrophiesComponent = Math.round(90 * Math.log1p(Math.max(0, psnTrophySignal) / 40));
 
-  // Xbox components already calculated above (xboxPlaytimeComponent and xboxAchievementComponent)
-
-  // Total score
   const score =
     steamComponent +
     completionComponent +
     raComponent +
     psnPlaytimeComponent +
     psnTrophiesComponent +
-    xboxPlaytimeComponent + 
-    xboxAchievementComponent + // ✅ add
+    xboxAchievementComponent +
+    xboxPlaytimeComponent +
     eraBonus;
 
   // 6) Confidence
   let confidence = 35;
+
   if (totalGames >= 20) confidence += 10;
   if (totalGames >= 60) confidence += 10;
 
@@ -209,7 +238,7 @@ const xboxPlaytimeComponent = 0;
 
   if (xboxTitles >= 10) confidence += 6;
   if (xboxTitles >= 30) confidence += 6;
-  if (xboxPlaytimeMinutes >= 60 * 10) confidence += 4;
+  if (xboxPlaytimeMinutesEstimated >= 60 * 10) confidence += 4;
 
   if ((eraRow as any)?.eras && Array.isArray((eraRow as any).eras) && (eraRow as any).eras.length > 0) {
     confidence += 10;
@@ -217,6 +246,21 @@ const xboxPlaytimeComponent = 0;
 
   confidence += eraConfidenceBonus;
   confidence = clamp(confidence, 0, 100);
+
+  const xboxAchDetailParts: string[] = [];
+  xboxAchDetailParts.push(`${xboxTitles} Xbox titles`);
+
+  if (xboxAchievementsTotal > 0) {
+    xboxAchDetailParts.push(`${xboxAchievementsEarned}/${xboxAchievementsTotal} achievements`);
+  } else if (xboxAchievementsEarned > 0) {
+    xboxAchDetailParts.push(`${xboxAchievementsEarned} achievements (total unknown)`);
+  }
+
+  if (xboxGamerscoreTotal > 0) {
+    xboxAchDetailParts.push(`${xboxGamerscoreEarned}/${xboxGamerscoreTotal} gamerscore`);
+  } else if (xboxGamerscoreEarned > 0) {
+    xboxAchDetailParts.push(`${xboxGamerscoreEarned} gamerscore (total unknown)`);
+  }
 
   const breakdown = {
     score_total: score,
@@ -227,8 +271,8 @@ const xboxPlaytimeComponent = 0;
       retroachievements: raComponent,
       psn_playtime: psnPlaytimeComponent,
       psn_trophies: psnTrophiesComponent,
-      xbox_playtime: xboxPlaytimeComponent,
       xbox_achievements: xboxAchievementComponent,
+      xbox_playtime: xboxPlaytimeComponent,
       era_bonus: eraBonus,
     },
     stats: {
@@ -246,7 +290,7 @@ const xboxPlaytimeComponent = 0;
       xbox_achievements_total: xboxAchievementsTotal,
       xbox_gamerscore_earned: xboxGamerscoreEarned,
       xbox_gamerscore_total: xboxGamerscoreTotal,
-      xbox_playtime_minutes: xboxPlaytimeMinutes,
+      xbox_playtime_minutes_estimated: xboxPlaytimeMinutesEstimated,
       xbox_achievement_signal_raw: xboxAchievementSignalRaw,
     },
     explain: [
@@ -274,33 +318,22 @@ const xboxPlaytimeComponent = 0;
         label: "PlayStation trophies",
         points: psnTrophiesComponent,
         detail:
-          psn.some((x) => x.trophy_progress != null)
+          psn.some((x: any) => x.trophy_progress != null)
             ? `Trophy progress contributes a light "completion signal" across titles.`
             : `Trophy progress not available yet — we'll enrich this with an additional PSN call.`,
       },
       {
         label: "Xbox achievements",
         points: xboxAchievementComponent,
-        detail: (() => {
-          const achStr =
-            xboxAchievementsTotal > 0
-              ? `${xboxAchievementsEarned}/${xboxAchievementsTotal}`
-              : `${xboxAchievementsEarned}`;
-
-          const gsStr =
-            xboxGamerscoreTotal > 0
-              ? `${xboxGamerscoreEarned}/${xboxGamerscoreTotal}`
-              : `${xboxGamerscoreEarned}`;
-
-          return xboxTitles > 0
-            ? `${xboxTitles} Xbox titles • ${achStr} achievements • ${gsStr} gamerscore.`
-            : "No Xbox titles imported yet — run Xbox sync.";
-        })(),
+        detail: xboxTitles > 0 ? `${xboxAchDetailParts.join(" • ")}.` : "No Xbox titles imported yet — run Xbox sync.",
       },
       {
-        label: "Xbox playtime",
-        points: 0,
-        detail: "Xbox playtime isn't available yet — the current Xbox title feed doesn't include time played. (Next step: add a second Xbox stats call + store minutes.)",
+        label: "Xbox playtime (estimated)",
+        points: xboxPlaytimeComponent,
+        detail:
+          xboxTitles > 0
+            ? `${Math.round(xboxPlaytimeMinutesEstimated / 60)}h estimated from achievement/gamerscore progress + recency. (This is a proxy, not official telemetry.)`
+            : "No Xbox titles imported yet — run Xbox sync.",
       },
       {
         label: "Era history bonus",
@@ -313,7 +346,6 @@ const xboxPlaytimeComponent = 0;
     ],
   };
 
-  // Cache to profiles for fast rendering/sharing
   await supabase
     .from("profiles")
     .update({
