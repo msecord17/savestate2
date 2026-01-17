@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 
-type TitleOut = {
+type XboxTitle = {
   name: string;
   titleId?: string;
   pfTitleId?: string;
@@ -14,7 +15,11 @@ type TitleOut = {
   last_played_at?: string | null;
 };
 
-function jsonOrNull(text: string) {
+function slugPlatformKey() {
+  return "xbox";
+}
+
+function safeJson(text: string) {
   try {
     return text ? JSON.parse(text) : null;
   } catch {
@@ -22,175 +27,18 @@ function jsonOrNull(text: string) {
   }
 }
 
-function isoOrNull(v: any): string | null {
-  if (!v) return null;
-  try {
-    const d = new Date(v);
-    if (isNaN(d.getTime())) return null;
-    return d.toISOString();
-  } catch {
-    return null;
-  }
-}
-
-function slugPlatformKey() {
-  return "xbox";
-}
-
-function xblAuthHeader(uhs: string, xstsToken: string) {
-  return `XBL3.0 x=${uhs};${xstsToken}`;
-}
-
-// 1) XBL user.authenticate
-async function xblAuthenticate(accessToken: string) {
-  const res = await fetch("https://user.auth.xboxlive.com/user/authenticate", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept-Language": "en-US",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      Properties: {
-        AuthMethod: "RPS",
-        SiteName: "user.auth.xboxlive.com",
-        RpsTicket: `d=${accessToken}`, // IMPORTANT
-      },
-      RelyingParty: "http://auth.xboxlive.com",
-      TokenType: "JWT",
-    }),
-  });
-
-  const text = await res.text();
-  const json = jsonOrNull(text);
-
-  if (!res.ok) {
-    return {
-      ok: false as const,
-      status: res.status,
-      error: `XBL user.authenticate failed (${res.status})`,
-      detail: json ?? text,
-    };
-  }
-
-  return { ok: true as const, token: json?.Token as string };
-}
-
-// 2) XSTS authorize
-async function xstsAuthorize(xblToken: string) {
-  const res = await fetch("https://xsts.auth.xboxlive.com/xsts/authorize", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Accept-Language": "en-US",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      Properties: {
-        SandboxId: "RETAIL",
-        UserTokens: [xblToken],
-      },
-      RelyingParty: "http://xboxlive.com",
-      TokenType: "JWT",
-    }),
-  });
-
-  const text = await res.text();
-  const json = jsonOrNull(text);
-
-  if (!res.ok) {
-    return {
-      ok: false as const,
-      status: res.status,
-      error: `XSTS authorize failed (${res.status})`,
-      detail: json ?? text,
-    };
-  }
-
-  const xstsToken = json?.Token as string;
-  const uhs = json?.DisplayClaims?.xui?.[0]?.uhs as string | undefined;
-
-  return { ok: true as const, token: xstsToken, uhs: uhs ?? null };
-}
-
-// 3) Profile: get xuid + gamertag
-async function fetchProfile(authorization: string) {
-  const res = await fetch("https://profile.xboxlive.com/users/me/profile/settings", {
-    method: "GET",
-    headers: {
-      Authorization: authorization,
-      "x-xbl-contract-version": "2",
-      "Accept-Language": "en-US",
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
-
-  const text = await res.text();
-  const json = jsonOrNull(text);
-
-  if (!res.ok) {
-    return {
-      ok: false as const,
-      status: res.status,
-      error: `Profile failed (${res.status})`,
-      detail: json ?? text,
-    };
-  }
-
-  const xuid = json?.profileUsers?.[0]?.id ?? null;
-
-  const settings = json?.profileUsers?.[0]?.settings ?? [];
-  const gamertag =
-    settings.find((s: any) => s?.id === "Gamertag")?.value ??
-    settings.find((s: any) => s?.id === "GameDisplayName")?.value ??
-    null;
-
-  return { ok: true as const, xuid, gamertag };
-}
-
-// 4) Achievements history titles
-async function fetchAchievementHistoryTitles(authorization: string, xuid: string) {
-  const url = `https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/history/titles?maxItems=500`;
-
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: authorization,
-      "x-xbl-contract-version": "2",
-      "Accept-Language": "en-US",
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
-
-  const text = await res.text();
-  const json = jsonOrNull(text);
-
-  if (!res.ok) {
-    return {
-      ok: false as const,
-      status: res.status,
-      error: `Achievements history/titles failed (${res.status})`,
-      detail: json ?? text,
-    };
-  }
-
-  const titles = Array.isArray(json?.titles) ? json.titles : [];
-  return { ok: true as const, titles };
-}
-
 export async function POST(req: Request) {
   try {
     const supabaseUser = await supabaseRouteClient();
     const { data: userRes, error: userErr } = await supabaseUser.auth.getUser();
+
     if (userErr || !userRes?.user) {
       return NextResponse.json({ error: "Not logged in" }, { status: 401 });
     }
     const user = userRes.user;
 
-    // Load stored xbox_access_token
-    const { data: profile, error: pErr } = await supabaseUser
+    // Confirm token exists (best early debug signal)
+    const { data: prof, error: pErr } = await supabaseUser
       .from("profiles")
       .select("xbox_access_token")
       .eq("user_id", user.id)
@@ -198,66 +46,54 @@ export async function POST(req: Request) {
 
     if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
 
-    const accessToken = String(profile?.xbox_access_token ?? "").trim();
-    if (!accessToken) {
-      return NextResponse.json({ error: "Xbox not connected (missing access token)" }, { status: 400 });
+    const tokenLen = String(prof?.xbox_access_token ?? "").length;
+    if (!prof?.xbox_access_token) {
+      return NextResponse.json(
+        { error: "Missing xbox_access_token (connect Xbox first).", debug: { tokenLen } },
+        { status: 400 }
+      );
     }
 
-    // XBL + XSTS handshake
-    const xbl = await xblAuthenticate(accessToken);
-    if (!xbl.ok) return NextResponse.json({ error: xbl.error, detail: xbl.detail }, { status: 500 });
+    // Forward cookies so /api/xbox/titles sees the logged-in user
+    const h = await headers();
+    const cookie = h.get("cookie") ?? "";
+    const origin = new URL(req.url).origin;
 
-    const xsts = await xstsAuthorize(xbl.token);
-    if (!xsts.ok) return NextResponse.json({ error: xsts.error, detail: xsts.detail }, { status: 500 });
-
-    if (!xsts.uhs || !xsts.token) {
-      return NextResponse.json({ error: "XSTS missing uhs/token" }, { status: 500 });
-    }
-
-    const authorization = xblAuthHeader(xsts.uhs, xsts.token);
-
-    const prof = await fetchProfile(authorization);
-    if (!prof.ok) return NextResponse.json({ error: prof.error, detail: prof.detail }, { status: 500 });
-
-    const xuid = String(prof.xuid ?? "").trim();
-    const gamertag = prof.gamertag ?? null;
-
-    if (!xuid) {
-      return NextResponse.json({ error: "Could not determine XUID from profile" }, { status: 500 });
-    }
-
-    const hist = await fetchAchievementHistoryTitles(authorization, xuid);
-    if (!hist.ok) return NextResponse.json({ error: hist.error, detail: hist.detail }, { status: 500 });
-
-    // Normalize titles (same mapping you already had)
-    const titles: TitleOut[] = (hist.titles as any[]).map((t) => {
-      const titleName = t?.name ?? t?.titleName ?? "Unknown";
-      const titleId = t?.titleId != null ? String(t.titleId) : undefined;
-
-      const achievementsEarned = Number(t?.achievement?.currentAchievements ?? t?.currentAchievements ?? 0);
-      const achievementsTotal = Number(t?.achievement?.totalAchievements ?? t?.totalAchievements ?? 0);
-
-      const gamerscoreEarned = Number(t?.achievement?.currentGamerscore ?? t?.currentGamerscore ?? 0);
-      const gamerscoreTotal = Number(t?.achievement?.totalGamerscore ?? t?.totalGamerscore ?? 0);
-
-      const lastPlayedAt =
-        isoOrNull(t?.lastTimePlayed) ??
-        isoOrNull(t?.lastPlayed) ??
-        isoOrNull(t?.lastUnlockTime) ??
-        null;
-
-      return {
-        name: String(titleName),
-        titleId,
-        pfTitleId: titleId,
-        devices: Array.isArray(t?.devices) ? t.devices : undefined,
-        achievements_earned: achievementsEarned,
-        achievements_total: achievementsTotal,
-        gamerscore_earned: gamerscoreEarned,
-        gamerscore_total: gamerscoreTotal,
-        last_played_at: lastPlayedAt,
-      };
+    const titlesRes = await fetch(`${origin}/api/xbox/titles`, {
+      method: "GET",
+      headers: { cookie, accept: "application/json" },
+      cache: "no-store",
     });
+
+    const titlesText = await titlesRes.text();
+
+    // HTML response means auth/cookies/redirect happened
+    if (titlesText.trim().startsWith("<")) {
+      return NextResponse.json(
+        {
+          error: `Xbox titles returned HTML (status ${titlesRes.status})`,
+          hint: "Usually means cookies not forwarded or titles route redirected to login.",
+          debug: { status: titlesRes.status, tokenLen, html_snippet: titlesText.slice(0, 200) },
+        },
+        { status: 500 }
+      );
+    }
+
+    const titlesJson = safeJson(titlesText);
+    if (!titlesRes.ok) {
+      return NextResponse.json(
+        {
+          error: titlesJson?.error || `Xbox titles failed (${titlesRes.status})`,
+          detail: titlesJson ?? titlesText.slice(0, 200),
+          debug: { status: titlesRes.status, tokenLen },
+        },
+        { status: 500 }
+      );
+    }
+
+    const titles: XboxTitle[] = Array.isArray(titlesJson?.titles) ? titlesJson.titles : [];
+    const xuid = titlesJson?.xuid ?? null;
+    const gamertag = titlesJson?.gamertag ?? null;
 
     // Admin client for catalog writes
     const supabaseAdmin = createClient(
@@ -268,22 +104,20 @@ export async function POST(req: Request) {
     let imported = 0;
     let updated = 0;
 
-    const progressRows: any[] = [];
-
     for (const t of titles) {
       const title = String(t.name || "").trim();
       if (!title) continue;
 
-      const titleId = String(t.titleId || t.pfTitleId || "").trim();
+      const xboxTitleId = String(t.titleId || t.pfTitleId || "").trim();
 
-      // Find / create release
+      // Find existing release
       let existingRelease: any = null;
 
-      if (titleId) {
+      if (xboxTitleId) {
         const { data } = await supabaseAdmin
           .from("releases")
           .select("id, game_id")
-          .eq("xbox_title_id", titleId)
+          .eq("xbox_title_id", xboxTitleId)
           .maybeSingle();
         existingRelease = data ?? null;
       }
@@ -300,6 +134,7 @@ export async function POST(req: Request) {
 
       let releaseId: string | null = existingRelease?.id ?? null;
 
+      // Create if missing
       if (!releaseId) {
         const { data: gameRow, error: gErr } = await supabaseAdmin
           .from("games")
@@ -321,7 +156,7 @@ export async function POST(req: Request) {
           platform_key: slugPlatformKey(),
           cover_url: null,
         };
-        if (titleId) releaseInsert.xbox_title_id = titleId;
+        if (xboxTitleId) releaseInsert.xbox_title_id = xboxTitleId;
 
         const { data: newRelease, error: rErr } = await supabaseAdmin
           .from("releases")
@@ -342,7 +177,7 @@ export async function POST(req: Request) {
         updated += 1;
       }
 
-      // portfolio entry (non-destructive)
+      // Portfolio entry (don’t overwrite manual edits)
       const { data: existingEntry } = await supabaseUser
         .from("portfolio_entries")
         .select("user_id, release_id")
@@ -359,52 +194,52 @@ export async function POST(req: Request) {
         });
       }
 
-      // xbox_title_progress row
-      progressRows.push({
-        user_id: user.id,
-        title_id: titleId || title,
-        title_name: title,
-        title_platform: "Xbox",
-        achievements_earned: Number(t.achievements_earned ?? 0),
-        achievements_total: Number(t.achievements_total ?? 0),
-        gamerscore_earned: Number(t.gamerscore_earned ?? 0),
-        gamerscore_total: Number(t.gamerscore_total ?? 0),
-        last_played_at: t.last_played_at ?? null,
-        last_updated_at: new Date().toISOString(),
-        release_id: releaseId,
-      });
-    }
-
-    // Write xbox_title_progress
-    if (progressRows.length > 0) {
-      const { error: upErr } = await supabaseUser
+      // Write per-title Xbox progress (so score can use it)
+      // NOTE: your xbox_title_progress table uses: title_id, title_name, achievements_*, gamerscore_*, last_played_at, release_id
+      await supabaseUser
         .from("xbox_title_progress")
-        .upsert(progressRows, { onConflict: "user_id,title_id" });
-
-      if (upErr) {
-        // If you don’t have that constraint, fallback to delete+insert
-        await supabaseUser.from("xbox_title_progress").delete().eq("user_id", user.id);
-
-        const { error: insErr2 } = await supabaseUser.from("xbox_title_progress").insert(progressRows);
-        if (insErr2) {
-          return NextResponse.json(
-            { error: `Failed to insert xbox_title_progress: ${insErr2.message}` },
-            { status: 500 }
-          );
-        }
-      }
+        .upsert(
+          {
+            user_id: user.id,
+            title_id: xboxTitleId || title, // fallback if no ID
+            title_name: title,
+            title_platform: "Xbox",
+            achievements_earned: t.achievements_earned ?? null,
+            achievements_total: t.achievements_total ?? null,
+            gamerscore_earned: t.gamerscore_earned ?? null,
+            gamerscore_total: t.gamerscore_total ?? null,
+            last_played_at: t.last_played_at ?? null,
+            last_updated_at: new Date().toISOString(),
+            release_id: releaseId,
+          },
+          { onConflict: "user_id,title_id" }
+        );
     }
 
     // Stamp profile
-    await supabaseUser
+    const { error: profErr } = await supabaseUser
       .from("profiles")
       .update({
-        xbox_xbl_key: xuid ?? null, // keep your existing column name
+        xbox_xuid: xuid ?? null, // if you have xbox_xuid, prefer this
+        xbox_gamertag: gamertag ?? null, // optional if you added
         xbox_last_synced_at: new Date().toISOString(),
         xbox_last_sync_count: titles.length,
         updated_at: new Date().toISOString(),
       })
       .eq("user_id", user.id);
+
+    if (profErr) {
+      // don’t fail the whole sync if stamping fails
+      return NextResponse.json({
+        ok: true,
+        imported,
+        updated,
+        total: titles.length,
+        xuid,
+        gamertag,
+        warning: `Profile stamp failed: ${profErr.message}`,
+      });
+    }
 
     return NextResponse.json({
       ok: true,
@@ -413,7 +248,6 @@ export async function POST(req: Request) {
       total: titles.length,
       xuid,
       gamertag,
-      progress_rows_written: progressRows.length,
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Xbox sync failed" }, { status: 500 });

@@ -88,14 +88,38 @@ export async function GET(req: Request) {
     return NextResponse.redirect(out.toString());
   }
 
-  // Save tokens to profiles
-  const { error: upErr } = await supabase.from("profiles").upsert({
-    user_id: user.id,
-    xbox_access_token: accessToken,
-    xbox_refresh_token: refreshToken || null,
-    xbox_connected_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  });
+  // Save tokens to profiles - update if exists, insert if not
+  const { data: existingProfile } = await supabase
+    .from("profiles")
+    .select("user_id")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  let upErr: any = null;
+  if (existingProfile) {
+    // Update existing profile
+    const { error } = await supabase
+      .from("profiles")
+      .update({
+        xbox_access_token: accessToken,
+        xbox_refresh_token: refreshToken || null,
+        xbox_connected_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("user_id", user.id);
+    upErr = error;
+  } else {
+    // Insert new profile
+    const { error } = await supabase.from("profiles").insert({
+      user_id: user.id,
+      xbox_access_token: accessToken,
+      xbox_refresh_token: refreshToken || null,
+      xbox_connected_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    upErr = error;
+  }
 
   if (upErr) {
     const out = new URL(doneUrl);
