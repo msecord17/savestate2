@@ -1,49 +1,38 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 
-function decodePart(part: string) {
-  part = part.replace(/-/g, "+").replace(/_/g, "/");
-  const pad = part.length % 4;
-  if (pad) part += "=".repeat(4 - pad);
-  const json = Buffer.from(part, "base64").toString("utf8");
-  return JSON.parse(json);
-}
-
 export async function GET() {
   const supabase = await supabaseRouteClient();
-  const { data: userRes } = await supabase.auth.getUser();
-  if (!userRes?.user) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+  const { data: userRes, error: userErr } = await supabase.auth.getUser();
 
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select("xbox_access_token")
-    .eq("user_id", userRes.user.id)
-    .maybeSingle();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-  const token = String(profile?.xbox_access_token ?? "");
-  if (!token) return NextResponse.json({ error: "No xbox_access_token" }, { status: 400 });
-
-  const parts = token.split(".");
-  if (parts.length < 2) {
-    return NextResponse.json({ ok: true, kind: "opaque", token_len: token.length });
+  if (userErr || !userRes?.user) {
+    return NextResponse.json({ ok: false, error: "Not logged in" }, { status: 401 });
   }
 
-  const header = decodePart(parts[0]);
-  const payload = decodePart(parts[1]);
+  const user = userRes.user;
+
+  const { data: profile, error: pErr } = await supabase
+    .from("profiles")
+    .select("user_id, xbox_access_token, xbox_refresh_token, xbox_connected_at, updated_at")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (pErr) {
+    return NextResponse.json({ ok: false, error: pErr.message }, { status: 500 });
+  }
+
+  const access = String(profile?.xbox_access_token ?? "");
+  const refresh = String(profile?.xbox_refresh_token ?? "");
 
   return NextResponse.json({
     ok: true,
-    token_len: token.length,
-    header: { alg: header.alg, typ: header.typ, kid: header.kid },
-    payload: {
-      iss: payload.iss,
-      aud: payload.aud,
-      tid: payload.tid,
-      scp: payload.scp,
-      exp: payload.exp,
-      ver: payload.ver,
-    },
+    user_id: user.id,
+    profile_exists: !!profile,
+    has_access_token: !!access,
+    access_token_len: access ? access.length : 0,
+    has_refresh_token: !!refresh,
+    refresh_token_len: refresh ? refresh.length : 0,
+    xbox_connected_at: profile?.xbox_connected_at ?? null,
+    updated_at: profile?.updated_at ?? null,
   });
 }

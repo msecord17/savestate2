@@ -1,98 +1,51 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 
-type XboxTitle = {
+type TitleOut = {
   name: string;
   titleId?: string;
   pfTitleId?: string;
   devices?: string[];
+  achievements_earned?: number;
+  achievements_total?: number;
+  gamerscore_earned?: number;
+  gamerscore_total?: number;
+  last_played_at?: string | null;
 };
 
-async function refreshXboxTokenIfNeeded(supabase: any, userId: string, origin: string) {
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select("xbox_access_token, xbox_refresh_token, xbox_access_token_expires_at")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error) throw new Error(error.message);
-
-  const accessToken = String(profile?.xbox_access_token ?? "");
-  const refreshToken = String(profile?.xbox_refresh_token ?? "");
-  const expiresAt = profile?.xbox_access_token_expires_at
-    ? new Date(profile.xbox_access_token_expires_at).getTime()
-    : 0;
-
-  if (!accessToken) throw new Error("Missing xbox_access_token (connect Xbox first).");
-
-  const now = Date.now();
-  const isExpiredSoon = expiresAt && expiresAt < now + 60_000;
-
-  if (!isExpiredSoon) return { accessToken, refreshed: false };
-
-  if (!refreshToken) return { accessToken, refreshed: false };
-
-  const clientId = process.env.XBOX_CLIENT_ID!;
-  const clientSecret = process.env.XBOX_CLIENT_SECRET!;
-  const redirectUri = process.env.XBOX_REDIRECT_URI || `${origin}/api/auth/xbox/callback`;
-
-  const tokenRes = await fetch("https://login.live.com/oauth20_token.srf", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      redirect_uri: redirectUri,
-    }).toString(),
-  });
-
-  const tokenText = await tokenRes.text();
-  let tokenJson: any = null;
+function jsonOrNull(text: string) {
   try {
-    tokenJson = tokenText ? JSON.parse(tokenText) : null;
+    return text ? JSON.parse(text) : null;
   } catch {
-    tokenJson = null;
+    return null;
   }
-
-  if (!tokenRes.ok || !tokenJson?.access_token) {
-    throw new Error(`Failed to refresh Xbox token: ${tokenText}`);
-  }
-
-  const newAccess = String(tokenJson.access_token);
-  const newRefresh = String(tokenJson.refresh_token || refreshToken);
-  const expiresIn = Number(tokenJson.expires_in || 3600);
-  const newExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
-
-  const { error: upErr } = await supabase
-    .from("profiles")
-    .update({
-      xbox_access_token: newAccess,
-      xbox_refresh_token: newRefresh || null,
-      xbox_access_token_expires_at: newExpiresAt,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("user_id", userId);
-
-  if (upErr) throw new Error(upErr.message);
-
-  return { accessToken: newAccess, refreshed: true };
 }
 
-async function xblUserAuthenticate(accessToken: string) {
+function isoOrNull(v: any): string | null {
+  if (!v) return null;
+  try {
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+// 1) XBL user.authenticate
+async function xblAuthenticate(accessToken: string) {
   const res = await fetch("https://user.auth.xboxlive.com/user/authenticate", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-xbl-contract-version": "1",
-      "Accept-Language": "en-US", // override weird wildcard values
+      "Accept-Language": "en-US",
+      Accept: "application/json",
     },
     body: JSON.stringify({
       Properties: {
         AuthMethod: "RPS",
         SiteName: "user.auth.xboxlive.com",
-        RpsTicket: `d=${accessToken}`,
+        RpsTicket: `d=${accessToken}`, // IMPORTANT
       },
       RelyingParty: "http://auth.xboxlive.com",
       TokenType: "JWT",
@@ -100,29 +53,28 @@ async function xblUserAuthenticate(accessToken: string) {
   });
 
   const text = await res.text();
-  let json: any = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
+  const json = jsonOrNull(text);
+
+  if (!res.ok) {
+    return {
+      ok: false as const,
+      status: res.status,
+      error: `XBL user.authenticate failed (${res.status})`,
+      detail: json ?? text,
+    };
   }
 
-  if (!res.ok || !json?.Token) {
-    throw new Error(`XBL user.authenticate failed (${res.status}): ${text || ""}`);
-  }
-
-  const uhs = json?.DisplayClaims?.xui?.[0]?.uhs;
-  if (!uhs) throw new Error("XBL auth succeeded but uhs missing in response.");
-
-  return { xblToken: json.Token as string, uhs: String(uhs) };
+  return { ok: true as const, token: json?.Token as string };
 }
 
+// 2) XSTS authorize
 async function xstsAuthorize(xblToken: string) {
   const res = await fetch("https://xsts.auth.xboxlive.com/xsts/authorize", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Accept-Language": "en-US",
+      Accept: "application/json",
     },
     body: JSON.stringify({
       Properties: {
@@ -135,101 +87,191 @@ async function xstsAuthorize(xblToken: string) {
   });
 
   const text = await res.text();
-  let json: any = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
+  const json = jsonOrNull(text);
+
+  if (!res.ok) {
+    return {
+      ok: false as const,
+      status: res.status,
+      error: `XSTS authorize failed (${res.status})`,
+      detail: json ?? text,
+    };
   }
 
-  if (!res.ok || !json?.Token) {
-    throw new Error(`XSTS authorize failed (${res.status}): ${text || ""}`);
-  }
+  const xstsToken = json?.Token as string;
+  const uhs = json?.DisplayClaims?.xui?.[0]?.uhs as string | undefined;
 
-  const xuid = json?.DisplayClaims?.xui?.[0]?.xid ? String(json.DisplayClaims.xui[0].xid) : null;
-  const gamertag = json?.DisplayClaims?.xui?.[0]?.gt ? String(json.DisplayClaims.xui[0].gt) : null;
-
-  if (!xuid) throw new Error("XSTS succeeded but xuid missing.");
-
-  return { xstsToken: json.Token as string, xuid, gamertag };
+  return { ok: true as const, token: xstsToken, uhs: uhs ?? null };
 }
 
-async function fetchXboxTitles(uhs: string, xstsToken: string, xuid: string): Promise<XboxTitle[]> {
-  const auth = `XBL3.0 x=${uhs};${xstsToken}`;
+// Helper: common XBL Authorization header format
+function xblAuthHeader(uhs: string, xstsToken: string) {
+  return `XBL3.0 x=${uhs};${xstsToken}`;
+}
 
-  // FIX #1: include XUID in the URL (TitleHub demands it)
-  const url = `https://titlehub.xboxlive.com/users/xuid(${encodeURIComponent(xuid)})/titles/titlehistory/decoration/detail`;
-
-  const res = await fetch(url, {
+// 3) Profile: get xuid + gamertag
+async function fetchProfile(authorization: string) {
+  const res = await fetch("https://profile.xboxlive.com/users/me/profile/settings", {
+    method: "GET",
     headers: {
-      Authorization: auth,
+      Authorization: authorization,
       "x-xbl-contract-version": "2",
-      "Accept-Language": "en-US", // FIX #2: override wildcard "*"
+      "Accept-Language": "en-US",
       Accept: "application/json",
     },
     cache: "no-store",
   });
 
   const text = await res.text();
-  let json: any = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
+  const json = jsonOrNull(text);
 
   if (!res.ok) {
-    throw new Error(`TitleHub failed (${res.status}): ${text || ""}`);
+    return {
+      ok: false as const,
+      status: res.status,
+      error: `Profile failed (${res.status})`,
+      detail: json ?? text,
+    };
   }
 
-  const titles = Array.isArray(json?.titles)
-    ? json.titles
-    : Array.isArray(json?.Titles)
-      ? json.Titles
-      : [];
+  // xuid is in profileUsers[0].id typically
+  const xuid = json?.profileUsers?.[0]?.id ?? null;
 
-  return titles.map((t: any) => ({
-    name: t?.name || t?.Name || "Unknown title",
-    titleId: t?.titleId ? String(t.titleId) : t?.TitleId ? String(t.TitleId) : undefined,
-    pfTitleId: t?.pfTitleId ? String(t.pfTitleId) : t?.PFTitleId ? String(t.PFTitleId) : undefined,
-    devices: Array.isArray(t?.devices) ? t.devices : Array.isArray(t?.Devices) ? t.Devices : undefined,
-  }));
+  // gamertag often in settings array
+  const settings = json?.profileUsers?.[0]?.settings ?? [];
+  const gamertag =
+    settings.find((s: any) => s?.id === "Gamertag")?.value ??
+    settings.find((s: any) => s?.id === "GameDisplayName")?.value ??
+    null;
+
+  return { ok: true as const, xuid, gamertag };
 }
 
-export async function GET(req: Request) {
-  try {
-    const supabase = await supabaseRouteClient();
-    const { data: userRes } = await supabase.auth.getUser();
-    if (!userRes?.user) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+// 4) Achievements history titles (earned/total + gamerscore)
+async function fetchAchievementHistoryTitles(authorization: string, xuid: string) {
+  // This endpoint returns per-title achievement + gamerscore totals.
+  // maxItems can be big; 500 covers most people.
+  const url = `https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(
+    xuid
+  )})/history/titles?maxItems=500`;
 
-    const user = userRes.user;
-    const origin = new URL(req.url).origin;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: authorization,
+      "x-xbl-contract-version": "2",
+      "Accept-Language": "en-US",
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
 
-    const { accessToken } = await refreshXboxTokenIfNeeded(supabase, user.id, origin);
+  const text = await res.text();
+  const json = jsonOrNull(text);
 
-    const { xblToken, uhs } = await xblUserAuthenticate(accessToken);
-    const { xstsToken, xuid, gamertag } = await xstsAuthorize(xblToken);
-
-    // Save xuid/gamertag for UI and later sync steps (non-fatal if fails)
-    await supabase
-      .from("profiles")
-      .update({
-        xbox_xuid: xuid,
-        xbox_gamertag: gamertag,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("user_id", user.id);
-
-    const titles = await fetchXboxTitles(uhs, xstsToken, xuid);
-
-    return NextResponse.json({
-      ok: true,
-      xuid,
-      gamertag,
-      titles,
-      total: titles.length,
-    });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Xbox titles failed" }, { status: 500 });
+  if (!res.ok) {
+    return {
+      ok: false as const,
+      status: res.status,
+      error: `Achievements history/titles failed (${res.status})`,
+      detail: json ?? text,
+    };
   }
+
+  // Typically json.titles is the list
+  const titles = Array.isArray(json?.titles) ? json.titles : [];
+  return { ok: true as const, titles };
+}
+
+export async function GET() {
+  // Must be logged in to your app
+  const supabase = await supabaseRouteClient();
+  const { data: userRes, error: userErr } = await supabase.auth.getUser();
+
+  if (userErr || !userRes?.user) {
+    return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+  }
+  const user = userRes.user;
+
+  // Get stored xbox_access_token
+  const { data: profile, error: pErr } = await supabase
+    .from("profiles")
+    .select("xbox_access_token")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
+
+  const accessToken = String(profile?.xbox_access_token ?? "").trim();
+  if (!accessToken) {
+    return NextResponse.json({ error: "Xbox not connected (missing access token)" }, { status: 400 });
+  }
+
+  // XBL + XSTS handshake
+  const xbl = await xblAuthenticate(accessToken);
+  if (!xbl.ok) return NextResponse.json({ error: xbl.error, detail: xbl.detail }, { status: 500 });
+
+  const xsts = await xstsAuthorize(xbl.token);
+  if (!xsts.ok) return NextResponse.json({ error: xsts.error, detail: xsts.detail }, { status: 500 });
+
+  if (!xsts.uhs || !xsts.token) {
+    return NextResponse.json({ error: "XSTS missing uhs/token" }, { status: 500 });
+  }
+
+  const authorization = xblAuthHeader(xsts.uhs, xsts.token);
+
+  // Profile -> xuid + gamertag
+  const prof = await fetchProfile(authorization);
+  if (!prof.ok) return NextResponse.json({ error: prof.error, detail: prof.detail }, { status: 500 });
+
+  const xuid = String(prof.xuid ?? "").trim();
+  const gamertag = prof.gamertag ?? null;
+
+  if (!xuid) {
+    return NextResponse.json({ error: "Could not determine XUID from profile" }, { status: 500 });
+  }
+
+  // Achievements per title
+  const hist = await fetchAchievementHistoryTitles(authorization, xuid);
+  if (!hist.ok) return NextResponse.json({ error: hist.error, detail: hist.detail }, { status: 500 });
+
+  // Normalize titles for sync route
+  const titles: TitleOut[] = (hist.titles as any[]).map((t) => {
+    const titleName = t?.name ?? t?.titleName ?? "Unknown";
+
+    const titleId = t?.titleId != null ? String(t.titleId) : undefined;
+
+    const achievementsEarned = Number(t?.achievement?.currentAchievements ?? t?.currentAchievements ?? 0);
+    const achievementsTotal = Number(t?.achievement?.totalAchievements ?? t?.totalAchievements ?? 0);
+
+    const gamerscoreEarned = Number(t?.achievement?.currentGamerscore ?? t?.currentGamerscore ?? 0);
+    const gamerscoreTotal = Number(t?.achievement?.totalGamerscore ?? t?.totalGamerscore ?? 0);
+
+    // last time played can show up in different fields depending on response shape
+    const lastPlayedAt =
+      isoOrNull(t?.lastTimePlayed) ??
+      isoOrNull(t?.lastPlayed) ??
+      isoOrNull(t?.lastUnlockTime) ??
+      null;
+
+    return {
+      name: String(titleName),
+      titleId,
+      pfTitleId: titleId, // keep compatibility with your earlier model
+      devices: Array.isArray(t?.devices) ? t.devices : undefined,
+      achievements_earned: achievementsEarned,
+      achievements_total: achievementsTotal,
+      gamerscore_earned: gamerscoreEarned,
+      gamerscore_total: gamerscoreTotal,
+      last_played_at: lastPlayedAt,
+    };
+  });
+
+  return NextResponse.json({
+    ok: true,
+    xuid,
+    gamertag,
+    gamerscore: null, // optional aggregate; you can compute later
+    titles,
+  });
 }
