@@ -241,11 +241,43 @@ export async function GET() {
 
     const titleId = t?.titleId != null ? String(t.titleId) : undefined;
 
-    const achievementsEarned = Number(t?.achievement?.currentAchievements ?? t?.currentAchievements ?? 0);
-    const achievementsTotal = Number(t?.achievement?.totalAchievements ?? t?.totalAchievements ?? 0);
+    const achievementsEarned =
+      Number(
+        t?.achievement?.currentAchievements ??
+        t?.currentAchievements ??
+        t?.earnedAchievements ??
+        t?.achievement?.earnedAchievements ??
+        0
+      );
 
-    const gamerscoreEarned = Number(t?.achievement?.currentGamerscore ?? t?.currentGamerscore ?? 0);
-    const gamerscoreTotal = Number(t?.achievement?.totalGamerscore ?? t?.totalGamerscore ?? 0);
+    const achievementsTotal =
+      Number(
+        t?.achievement?.totalAchievements ??
+        t?.totalAchievements ??
+        t?.availableAchievements ??
+        t?.achievement?.availableAchievements ??
+        0
+      );
+
+    const gamerscoreEarned =
+      Number(
+        t?.achievement?.currentGamerscore ??
+        t?.currentGamerscore ??
+        t?.earnedGamerscore ??
+        t?.achievement?.earnedGamerscore ??
+        0
+      );
+
+    const gamerscoreTotal =
+      Number(
+        t?.achievement?.totalGamerscore ??
+        t?.totalGamerscore ??
+        t?.maxGamerscore ??
+        t?.possibleGamerscore ??
+        t?.achievement?.maxGamerscore ??
+        t?.achievement?.possibleGamerscore ??
+        0
+      );
 
     // last time played can show up in different fields depending on response shape
     const lastPlayedAt =

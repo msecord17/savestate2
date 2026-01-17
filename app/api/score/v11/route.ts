@@ -281,10 +281,21 @@ const xboxPlaytimeComponent = 0;
       {
         label: "Xbox achievements",
         points: xboxAchievementComponent,
-        detail:
-          xboxTitles > 0
-            ? `${xboxTitles} Xbox titles • ${xboxAchievementsEarned}/${xboxAchievementsTotal} achievements • ${xboxGamerscoreEarned}/${xboxGamerscoreTotal} gamerscore.`
-            : "No Xbox titles imported yet — run Xbox sync.",
+        detail: (() => {
+          const achStr =
+            xboxAchievementsTotal > 0
+              ? `${xboxAchievementsEarned}/${xboxAchievementsTotal}`
+              : `${xboxAchievementsEarned}`;
+
+          const gsStr =
+            xboxGamerscoreTotal > 0
+              ? `${xboxGamerscoreEarned}/${xboxGamerscoreTotal}`
+              : `${xboxGamerscoreEarned}`;
+
+          return xboxTitles > 0
+            ? `${xboxTitles} Xbox titles • ${achStr} achievements • ${gsStr} gamerscore.`
+            : "No Xbox titles imported yet — run Xbox sync.";
+        })(),
       },
       {
         label: "Xbox playtime",
