@@ -71,9 +71,29 @@ export default function ProfilePage() {
 
   async function runSync(path: string, label: string) {
     try {
-      const res = await fetch(path, { method: "POST" });
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { accept: "application/json" },
+      });
+
       const text = await res.text();
-      const data = text ? JSON.parse(text) : null;
+
+      // If we got HTML (usually a redirect/login page), don't JSON.parse it
+      if (text.trim().startsWith("<")) {
+        window.alert(
+          `${label} sync failed (${res.status}): Server returned HTML (likely auth/redirect).\n\n` +
+            `Hit this endpoint in the browser to confirm:\n${path}`
+        );
+        return;
+      }
+
+      let data: any = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        window.alert(`${label} sync failed (${res.status}): Non-JSON response:\n\n${text.slice(0, 200)}`);
+        return;
+      }
 
       if (!res.ok) {
         window.alert(`${label} sync failed (${res.status}): ${data?.error || text}`);
@@ -87,6 +107,38 @@ export default function ProfilePage() {
       await load();
     } catch (e: any) {
       window.alert(`${label} sync error: ${e?.message || e}`);
+    }
+  }
+
+  async function runPsnAutoStatus() {
+    try {
+      const res = await fetch("/api/psn/auto-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const text = await res.text();
+      let data: any = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        // keep raw text
+      }
+
+      if (!res.ok) {
+        throw new Error(
+          `Auto-status failed (${res.status}): ${data?.error || text || "Unknown error"}`
+        );
+      }
+
+      alert(`✅ PSN Auto-status: updated ${data.updated}, skipped ${data.skipped}`);
+      await load();
+      return data;
+    } catch (e: any) {
+      // This will catch true network errors too
+      alert(`Auto-status failed: ${e?.message || "Failed to fetch"}`);
+      console.error("PSN auto-status error:", e);
+      throw e;
     }
   }
 
@@ -372,8 +424,63 @@ export default function ProfilePage() {
                   >
                     Run PSN Sync
                   </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/psn/map", { method: "POST" });
+                        const text = await res.text();
+
+                        let json: any = null;
+                        try { json = text ? JSON.parse(text) : null; } catch {}
+
+                        if (!res.ok) {
+                          alert(`PSN map failed (${res.status}): ${json?.error || text || "unknown"}`);
+                          return;
+                        }
+
+                        // Smart message when nothing needed mapping
+                        const mapped = json?.mapped ?? 0;
+                        const created = json?.created ?? 0;
+                        const psn_unmapped = json?.debug?.psn_unmapped ?? 0;
+
+                        if (mapped === 0 && created === 0 && psn_unmapped === 0) {
+                          alert("✅ Already mapped — no work needed.");
+                        } else {
+                          alert(`✅ PSN map complete:\n\nMapped: ${mapped}\nCreated: ${created}\nSkipped: ${json?.skipped ?? 0}`);
+                        }
+                      } catch (e: any) {
+                        alert(`❌ Failed to fetch /api/psn/map: ${e?.message || e}`);
+                      }
+                    }}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Map PSN Titles → Catalog
+                  </button>
+                  <button
+                    type="button"
+                    onClick={runPsnAutoStatus}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Auto-suggest statuses (PSN)
+                  </button>
                 </div>
               </div>
+              
             ) : (
               <Link
                 href="/playstation-connect"
@@ -390,6 +497,7 @@ export default function ProfilePage() {
               >
                 Connect PlayStation
               </Link>
+              
             )}
           </div>
 
@@ -453,28 +561,67 @@ export default function ProfilePage() {
               </Link>
             )}
             <button
-  type="button"
-  onClick={async () => {
-    const res = await fetch("/api/auth/xbox/disconnect", { method: "POST" });
-    const text = await res.text();
-    if (!res.ok) return alert(`Disconnect failed: ${text}`);
-    alert("Xbox disconnected ✅");
-    await load(); // your existing loadMe/load function
-  }}
-  style={{
-    padding: "8px 12px",
-    borderRadius: 12,
-    border: "1px solid #e5e7eb",
-    background: "white",
-    fontWeight: 900,
-    cursor: "pointer",
-  }}
->
-  Disconnect Xbox
-</button>
+              type="button"
+              onClick={async () => {
+                const res = await fetch("/api/auth/xbox/disconnect", { method: "POST" });
+                const text = await res.text();
+                if (!res.ok) return alert(`Disconnect failed: ${text}`);
+                alert("Xbox disconnected ✅");
+                await load();
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                background: "white",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              Disconnect Xbox
+            </button>
+          </div>
+
+          {/* Portfolio Actions */}
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Portfolio</div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const res = await fetch("/api/portfolio/auto-status", { method: "POST" });
+                  const text = await res.text();
+                  const data = text ? JSON.parse(text) : null;
+
+                  if (!res.ok) {
+                    alert(`Auto-status failed (${res.status}): ${data?.error || text}`);
+                    return;
+                  }
+
+                  alert(
+                    `Auto-status done ✅\n\nConsidered: ${data.considered}\nUpdated: ${data.applied}\nInserted: ${data.inserted}\n\n(Only upgrades entries still marked "owned")`
+                  );
+
+                  await load();
+                } catch (e: any) {
+                  alert(e?.message || "Auto-status failed");
+                }
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                background: "white",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              Auto-suggest statuses (PSN + Xbox)
+            </button>
           </div>
         </div>
       )}
+      
     </div>
   );
 }
