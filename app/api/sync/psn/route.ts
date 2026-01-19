@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { createClient } from "@supabase/supabase-js";
 
 import {
   getPsnAccessTokenFromNpsso,
@@ -9,12 +10,13 @@ import {
 } from "@/lib/psn/server";
 
 /**
- * We must not "lose" titles when Sony doesn't give us a stable id.
  * Strategy:
- * - Prefer a real stable id: npCommunicationId (trophies) or titleId (played)
- * - If missing, generate a deterministic synthetic id from the title name + platform.
- *   (This makes mapping + auto-status still possible.)
+ * - Store PSN title signal in psn_title_progress (same as today)
+ * - ALSO map each PSN title -> releases.id using release_external_ids
+ * - platform_key stays 'psn'
+ * - platform_label becomes PS5/PS4/PS3/Vita/etc (from PSN trophyTitlePlatform when possible)
  */
+
 function normTitle(s: string) {
   return (s || "")
     .toLowerCase()
@@ -26,10 +28,9 @@ function normTitle(s: string) {
 }
 
 function makeSyntheticId(titleName: string, platform: string) {
-  return `synthetic:${platform}:${normTitle(titleName)}`; // deterministic + readable
+  return `synthetic:${platform}:${normTitle(titleName)}`;
 }
 
-// Parse ISO 8601 duration like "PT228H56M33S" into minutes
 function isoDurationToMinutes(v: any): number | null {
   if (!v) return null;
   const duration = String(v);
@@ -50,12 +51,30 @@ function toIsoOrNow(v: any) {
   return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
 }
 
+function canonicalPlatformLabel(raw: string | null | undefined) {
+  // PSN commonly returns: "PS5", "PS4", "PS3", "PSVITA", etc.
+  const s = String(raw || "").trim();
+  if (!s) return "PlayStation";
+
+  const u = s.toUpperCase();
+  if (u.includes("PS5")) return "PS5";
+  if (u.includes("PS4")) return "PS4";
+  if (u.includes("PS3")) return "PS3";
+  if (u.includes("VITA")) return "Vita";
+  if (u.includes("PSP")) return "PSP";
+  if (u.includes("PS2")) return "PS2";
+  if (u.includes("PS1") || u.includes("PSX")) return "PS1";
+
+  // default fallback
+  return s;
+}
+
 /**
- * Merge-upsert:
- * - We upsert by (user_id, np_communication_id)
- * - We NEVER clobber an existing non-null field with null/undefined
- * - We keep the "max" playtime_minutes (so playtime doesn't go backwards)
- * - We keep last_updated_at as the newer timestamp
+ * Merge-upsert for psn_title_progress:
+ * - Upsert by (user_id, np_communication_id)
+ * - Never clobber non-null fields with null
+ * - Keep max playtime_minutes
+ * - Keep newest last_updated_at
  */
 async function mergeUpsertPsnTitle(
   supabase: any,
@@ -63,24 +82,24 @@ async function mergeUpsertPsnTitle(
   key: string,
   patch: {
     title_name?: string | null;
-    title_platform?: string | null;
+    title_platform?: string | null; // we will store specific label here (PS5/PS4/...)
     playtime_minutes?: number | null;
     trophy_progress?: number | null;
     trophies_earned?: number | null;
     trophies_total?: number | null;
     last_updated_at?: string | null;
+    release_id?: string | null;
   }
 ) {
   const { data: existing, error: exErr } = await supabase
     .from("psn_title_progress")
     .select(
-      "user_id, np_communication_id, title_name, title_platform, playtime_minutes, trophy_progress, trophies_earned, trophies_total, last_updated_at"
+      "user_id, np_communication_id, title_name, title_platform, playtime_minutes, trophy_progress, trophies_earned, trophies_total, last_updated_at, release_id"
     )
     .eq("user_id", userId)
     .eq("np_communication_id", key)
     .maybeSingle();
 
-  // If select fails, still try a plain upsert as a fallback.
   if (exErr) {
     const { error: upErr } = await supabase.from("psn_title_progress").upsert(
       {
@@ -112,7 +131,6 @@ async function mergeUpsertPsnTitle(
     user_id: userId,
     np_communication_id: key,
 
-    // never clobber with null
     title_name: patch.title_name ?? current?.title_name ?? null,
     title_platform: patch.title_platform ?? current?.title_platform ?? null,
 
@@ -121,6 +139,9 @@ async function mergeUpsertPsnTitle(
     trophy_progress: patch.trophy_progress ?? current?.trophy_progress ?? null,
     trophies_earned: patch.trophies_earned ?? current?.trophies_earned ?? null,
     trophies_total: patch.trophies_total ?? current?.trophies_total ?? null,
+
+    // release_id should be sticky once set
+    release_id: patch.release_id ?? current?.release_id ?? null,
 
     last_updated_at: nextUpdatedAt,
   };
@@ -138,6 +159,98 @@ async function mergeUpsertPsnTitle(
   }
 }
 
+/**
+ * Ensure a releases row exists for this PSN title, using release_external_ids.
+ * Returns release_id.
+ */
+async function ensureReleaseForPsnTitle(opts: {
+  admin: any;
+  titleName: string;
+  psnExternalId: string; // real npCommunicationId/titleId OR synthetic id
+  platformLabel: string; // PS5/PS4/...
+}) {
+  const { admin, titleName, psnExternalId, platformLabel } = opts;
+
+  // 1) Look up by external id
+  const { data: mapRow, error: mapErr } = await admin
+    .from("release_external_ids")
+    .select("release_id")
+    .eq("source", "psn")
+    .eq("external_id", psnExternalId)
+    .maybeSingle();
+
+  if (mapErr) throw new Error(`release_external_ids lookup failed: ${mapErr.message}`);
+  if (mapRow?.release_id) return String(mapRow.release_id);
+
+  // 2) Create game + release (fallback uses canonical_title unique)
+  const canonical = titleName.trim();
+
+  const { data: gameRow, error: gErr } = await admin
+    .from("games")
+    .upsert({ canonical_title: canonical }, { onConflict: "canonical_title" })
+    .select("id")
+    .single();
+
+  if (gErr || !gameRow?.id) throw new Error(`Failed to upsert game: ${gErr?.message || "unknown"}`);
+  const gameId = gameRow.id;
+
+  // 3) Insert release (platform_key = psn, platform_label = PS5/PS4 etc)
+  const releaseInsert: any = {
+    game_id: gameId,
+    display_title: titleName.trim(),
+    platform_key: "psn",
+    platform_name: "PlayStation",
+    platform_label: platformLabel,
+    cover_url: null,
+  };
+
+  const { data: releaseRow, error: rErr } = await admin
+    .from("releases")
+    .insert(releaseInsert)
+    .select("id")
+    .single();
+
+  if (rErr || !releaseRow?.id) throw new Error(`Failed to insert release: ${rErr?.message || "unknown"}`);
+
+  const releaseId = String(releaseRow.id);
+
+  // 4) Insert mapping (unique source+external_id prevents duplicates forever)
+  const { error: insMapErr } = await admin.from("release_external_ids").insert({
+    release_id: releaseId,
+    source: "psn",
+    external_id: psnExternalId,
+    external_id_type: psnExternalId.startsWith("synthetic:") ? "synthetic" : "np_communication_id",
+  });
+
+  if (insMapErr) throw new Error(`Failed to insert release_external_ids row: ${insMapErr.message}`);
+
+  return releaseId;
+}
+
+/**
+ * Ensure portfolio entry exists (don’t overwrite manual status).
+ */
+async function ensurePortfolioEntry(supabaseUser: any, userId: string, releaseId: string) {
+  const { data: existing, error: exErr } = await supabaseUser
+    .from("portfolio_entries")
+    .select("user_id, release_id, status")
+    .eq("user_id", userId)
+    .eq("release_id", releaseId)
+    .maybeSingle();
+
+  if (exErr) throw new Error(`portfolio_entries lookup failed: ${exErr.message}`);
+  if (existing) return;
+
+  const { error: insErr } = await supabaseUser.from("portfolio_entries").insert({
+    user_id: userId,
+    release_id: releaseId,
+    status: "owned",
+    updated_at: new Date().toISOString(),
+  });
+
+  if (insErr) throw new Error(`portfolio_entries insert failed: ${insErr.message}`);
+}
+
 export async function POST() {
   try {
     const supabaseUser = await supabaseRouteClient();
@@ -147,6 +260,11 @@ export async function POST() {
       return NextResponse.json({ error: "Not logged in" }, { status: 401 });
     }
     const user = userRes.user;
+
+    const supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
 
     // 1) Load NPSSO + cached account id
     const { data: profile, error: pErr } = await supabaseUser
@@ -183,10 +301,11 @@ export async function POST() {
     }
 
     // ------------------------------------------------------------
-    // A) Played games feed (usually best for playtime)
+    // A) Played games feed (playtime)
     // ------------------------------------------------------------
     let playedImported = 0;
     let playedUpdated = 0;
+    let releasesTouched = 0;
 
     const played = await getUserPlayedGames(accessToken, accountId);
     const playedRows = Array.isArray(played) ? played : [];
@@ -195,26 +314,40 @@ export async function POST() {
       const titleName = String(g?.name ?? "").trim();
       if (!titleName) continue;
 
-      // Prefer stable id if present, else synthetic
+      // played feed often doesn't have platform granularity -> default to PlayStation
+      const platformLabel = "PlayStation";
+
       const realId = String(g?.titleId ?? "").trim();
-      const key = realId || makeSyntheticId(titleName, "PlayStation");
+      const key = realId || makeSyntheticId(titleName, platformLabel);
 
       const playtimeMinutes = isoDurationToMinutes(g?.playDuration);
 
+      // Ensure release + mapping
+      const releaseId = await ensureReleaseForPsnTitle({
+        admin: supabaseAdmin,
+        titleName,
+        psnExternalId: key,
+        platformLabel,
+      });
+
+      releasesTouched += 1;
+
       const res = await mergeUpsertPsnTitle(supabaseUser, user.id, key, {
         title_name: titleName,
-        title_platform: "PlayStation",
+        title_platform: platformLabel,
         playtime_minutes: playtimeMinutes,
-        // don't set trophy fields here (leave them to trophy feed / merge)
         last_updated_at: new Date().toISOString(),
+        release_id: releaseId,
       });
 
       if (res.ok && res.inserted) playedImported += 1;
       if (res.ok && res.updated) playedUpdated += 1;
+
+      await ensurePortfolioEntry(supabaseUser, user.id, releaseId);
     }
 
     // ------------------------------------------------------------
-    // B) Trophy titles feed (best for trophy_progress + totals)
+    // B) Trophy titles feed (platform + completion signal)
     // ------------------------------------------------------------
     let trophyImported = 0;
     let trophyUpdated = 0;
@@ -226,9 +359,11 @@ export async function POST() {
       const titleName = String(t?.trophyTitleName ?? "").trim();
       if (!titleName) continue;
 
+      const rawPlatform = String(t?.trophyTitlePlatform ?? "PlayStation").trim() || "PlayStation";
+      const platformLabel = canonicalPlatformLabel(rawPlatform);
+
       const realId = String(t?.npCommunicationId ?? "").trim();
-      const platform = String(t?.trophyTitlePlatform ?? "PlayStation").trim() || "PlayStation";
-      const key = realId || makeSyntheticId(titleName, platform);
+      const key = realId || makeSyntheticId(titleName, platformLabel);
 
       const progress = t?.progress != null ? Number(t.progress) : null;
 
@@ -250,17 +385,29 @@ export async function POST() {
             Number(definedObj.platinum || 0)
           : null;
 
+      const releaseId = await ensureReleaseForPsnTitle({
+        admin: supabaseAdmin,
+        titleName,
+        psnExternalId: key,
+        platformLabel,
+      });
+
+      releasesTouched += 1;
+
       const res = await mergeUpsertPsnTitle(supabaseUser, user.id, key, {
         title_name: titleName,
-        title_platform: platform,
+        title_platform: platformLabel,
         trophy_progress: progress,
         trophies_earned: trophiesEarned,
         trophies_total: trophiesTotal,
         last_updated_at: toIsoOrNow(t?.lastUpdatedDateTime),
+        release_id: releaseId,
       });
 
       if (res.ok && res.inserted) trophyImported += 1;
       if (res.ok && res.updated) trophyUpdated += 1;
+
+      await ensurePortfolioEntry(supabaseUser, user.id, releaseId);
     }
 
     // 4) Update profile stamps
@@ -287,8 +434,8 @@ export async function POST() {
       played: { imported: playedImported, updated: playedUpdated, total: playedRows.length },
       trophies: { imported: trophyImported, updated: trophyUpdated, total: trophyRows.length },
       total: lastCount,
-      synthetic_note:
-        "If Sony doesn't return titleId/npCommunicationId for some titles, we store a deterministic synthetic id (synthetic:<platform>:<normalized title>) so you don't lose data.",
+      releases_touched: releasesTouched,
+      note: "This sync now also maps PSN titles into releases + release_external_ids, and ensures portfolio_entries exists.",
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "PSN sync failed" }, { status: 500 });

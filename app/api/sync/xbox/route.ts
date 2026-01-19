@@ -154,6 +154,7 @@ export async function POST(req: Request) {
           display_title: title,
           platform_name: "Xbox",
           platform_key: slugPlatformKey(),
+          platform_label: "Xbox", // TODO: parse t.devices to detect Series X|S vs One vs 360
           cover_url: null,
         };
         if (xboxTitleId) releaseInsert.xbox_title_id = xboxTitleId;
