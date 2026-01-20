@@ -307,19 +307,22 @@ export async function GET(req: Request) {
       const psn = psnByRelease[rid] ?? null;
       const xb = xboxByRelease[rid] ?? null;
 
-      const isSteamRelease =
-        String(rel.platform_key || "").toLowerCase() === "steam" ||
-        String(rel.platform_name || "").toLowerCase().includes("steam");
+      // portfolio_entries.playtime_minutes should ONLY count as Steam time for Steam releases
+      const steamMinutes =
+        rel.platform_key === "steam" ? Number(r?.playtime_minutes || 0) : 0;
 
-      const steamMinutesRaw = Number(r?.playtime_minutes || 0);
-
-      // Only count "Steam playtime" if this is actually the Steam release
-      const steamMinutes = isSteamRelease ? steamMinutesRaw : 0;
-
+      // Sources in *release mode* should be deterministic by platform_key.
+      // Otherwise filters get weird when a platform has no progress row yet.
       const sources: string[] = [];
-      if (isSteamRelease && steamMinutes > 0) sources.push("Steam");
-      if (psn) sources.push("PSN");
-      if (xb) sources.push("Xbox");
+      if (rel.platform_key === "steam") sources.push("Steam");
+      if (rel.platform_key === "psn") sources.push("PSN");
+      if (rel.platform_key === "xbox") sources.push("Xbox");
+
+      // Optional: if you want "signal-based" sources too, keep these,
+      // but they're not required once platform_key drives it.
+      if (steamMinutes > 0 && !sources.includes("Steam")) sources.push("Steam");
+      if (psn && !sources.includes("PSN")) sources.push("PSN");
+      if (xb && !sources.includes("Xbox")) sources.push("Xbox");
 
       const psnUpdated = toIsoOrNull(psn?.last_updated_at);
       const xbUpdated = toIsoOrNull(xb?.last_updated_at);
@@ -340,7 +343,7 @@ export async function GET(req: Request) {
         status: String(r?.status ?? "owned"),
         steam_playtime_minutes: steamMinutes,
 
-        psn_playtime_minutes: psn ? Number(psn.playtime_minutes ?? 0) : null,
+        psn_playtime_minutes: psn?.playtime_minutes != null ? Number(psn.playtime_minutes) : null,
         psn_trophy_progress: psn?.trophy_progress != null ? Number(psn.trophy_progress) : null,
         psn_trophies_earned: psn?.trophies_earned != null ? Number(psn.trophies_earned) : null,
         psn_trophies_total: psn?.trophies_total != null ? Number(psn.trophies_total) : null,

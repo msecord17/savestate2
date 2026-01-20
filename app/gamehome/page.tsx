@@ -10,6 +10,9 @@ type Card = {
 
   // release mode
   release_id?: string;
+  platform_key?: string | null;
+  platform_name?: string | null;
+  platform_label?: string | null;
 
   title: string;
   cover_url: string | null;
@@ -106,13 +109,23 @@ export default function GameHomePage() {
 
   const platforms = useMemo(() => {
     const set = new Set<string>();
+
     for (const c of cards) {
-      if (Array.isArray(c.platforms)) {
-        c.platforms.forEach((p) => set.add(p));
+      if (splitByPlatform) {
+        const p = (c.platform_label || c.platform_name || c.platform_key || "").trim();
+        if (p) set.add(p);
+      } else {
+        if (Array.isArray(c.platforms)) {
+          c.platforms.forEach((p) => {
+            const v = String(p || "").trim();
+            if (v) set.add(v);
+          });
+        }
       }
     }
+
     return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
-  }, [cards]);
+  }, [cards, splitByPlatform]);
 
   const statuses = useMemo(() => {
     const set = new Set<string>();
@@ -127,9 +140,13 @@ export default function GameHomePage() {
     let out = cards.slice();
 
     if (platform !== "all") {
-      out = out.filter((c) =>
-        Array.isArray(c.platforms) ? c.platforms.includes(platform) : false
-      );
+      out = out.filter((c) => {
+        if (splitByPlatform) {
+          const p = (c.platform_label || c.platform_name || c.platform_key || "").trim();
+          return p === platform;
+        }
+        return Array.isArray(c.platforms) ? c.platforms.includes(platform) : false;
+      });
     }
 
     if (source !== "all") {
@@ -298,19 +315,32 @@ export default function GameHomePage() {
                 gap: 14,
               }}
             >
-              {filtered.map((c) => {
+              {filtered.map((c, idx) => {
                 const updated = timeAgo(c.lastSignalAt);
 
-                const hasSteam = c.steam_playtime_minutes > 0;
-                const hasPsn = c.psn_playtime_minutes != null && c.psn_playtime_minutes > 0;
-                const hasXbox = (c.xbox_gamerscore_total ?? 0) > 0 || (c.xbox_achievements_total ?? 0) > 0;
+                const hasSteam = Number(c.steam_playtime_minutes || 0) > 0;
+
+                const hasPsn =
+                  c.psn_playtime_minutes != null ||
+                  c.psn_trophy_progress != null ||
+                  (c as any).psn_last_updated_at != null;
+
+                const hasXbox =
+                  c.xbox_gamerscore_total != null ||
+                  c.xbox_achievements_total != null ||
+                  (c as any).xbox_last_updated_at != null;
 
                 const showPsnTrophies = c.psn_trophy_progress != null;
                 const showXboxGS = (c.xbox_gamerscore_total ?? 0) > 0;
 
+                // Ensure unique key in both modes
+                const uniqueKey = splitByPlatform
+                  ? (c.release_id ?? `${c.title}-${idx}`)
+                  : (c.game_id ?? c.release_id ?? `${c.title}-${idx}`);
+
                 return (
                   <div
-                    key={(c.game_id ?? c.release_id ?? c.title) as string}
+                    key={uniqueKey}
                     style={{
                       border: "1px solid #e5e7eb",
                       borderRadius: 8,
@@ -328,69 +358,134 @@ export default function GameHomePage() {
                     />
 
                     <div style={{ padding: 12 }}>
-                      <div style={{ fontWeight: 900, lineHeight: 1.2, marginBottom: 6 }}>
+                      {/* Title */}
+                      <div style={{ fontWeight: 900, fontSize: 16, lineHeight: 1.25 }}>
                         {c.title}
                       </div>
 
-                      <div style={{ color: "#64748b", fontSize: 13, marginBottom: 10 }}>
-                        {Array.isArray(c.platforms) && c.platforms.length
-                          ? `Platforms: ${c.platforms.join(" • ")}`
-                          : "Platforms: —"}
-                        {updated ? (
-                          <>
-                            {" "}
-                            • <span style={{ fontWeight: 900, color: "#0f172a" }}>Updated</span>{" "}
-                            {updated}
-                          </>
-                        ) : null}
+                      {/* Platform(s) */}
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 6,
+                          flexWrap: "wrap",
+                          marginTop: 4,
+                          marginBottom: 10,
+                        }}
+                      >
+                        {(Array.isArray((c as any).platforms)
+                          ? (c as any).platforms
+                          : [c.platform_label || c.platform_name || c.platform_key]
+                        )
+                          .filter(Boolean)
+                          .map((p: string) => (
+                            <span
+                              key={p}
+                              style={{
+                                fontSize: 11,
+                                padding: "2px 8px",
+                                borderRadius: 999,
+                                background: "#f1f5f9",
+                                border: "1px solid #e5e7eb",
+                                fontWeight: 700,
+                                color: "#0f172a",
+                              }}
+                            >
+                              {p}
+                            </span>
+                          ))}
                       </div>
 
+                      {c.lastSignalAt && (
+                        <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>
+                          Last activity: <b>{timeAgo(c.lastSignalAt)}</b>
+                        </div>
+                      )}
+
                       {/* indicator pills */}
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-                        <span style={pillStyle("#f8fafc")}>Status: {c.status || "owned"}</span>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
+                        {/* Status (primary) */}
+                        <span
+                          style={{
+                            ...pillStyle(
+                              c.status === "completed"
+                                ? "#ecfeff"
+                                : c.status === "playing"
+                                ? "#eef2ff"
+                                : c.status === "wishlist"
+                                ? "#f8fafc"
+                                : "#fff7ed"
+                            ),
+                            fontWeight: 900,
+                          }}
+                        >
+                          {c.status || "owned"}
+                        </span>
 
-                        {hasSteam ? <span style={pillStyle("#ecfeff")}>Steam</span> : null}
-                        {hasPsn ? <span style={pillStyle("#dbeafe")}>PSN</span> : null}
-                        {hasXbox ? <span style={pillStyle("#dcfce7")}>Xbox</span> : null}
-
-                        {!hasSteam && !hasPsn && !hasXbox ? (
-                          <span style={pillStyle("#f1f5f9")}>No signals yet</span>
-                        ) : null}
+                        {/* Sync signals */}
+                        <div style={{ display: "flex", gap: 10, fontSize: 11, color: "#64748b" }}>
+                          {hasSteam && <span>Steam</span>}
+                          {hasPsn && <span>PSN</span>}
+                          {hasXbox && <span>Xbox</span>}
+                          {!hasSteam && !hasPsn && !hasXbox && (
+                            <span style={{ color: "#b45309" }}>No sync signal</span>
+                          )}
+                        </div>
                       </div>
 
                       {/* details block */}
-                      <div style={{ display: "grid", gap: 6, fontSize: 13, color: "#0f172a" }}>
-                        <div style={{ color: "#64748b" }}>
-                          <b>Playtime</b>{" "}
-                          <span style={{ color: "#0f172a" }}>
-                            {hasSteam ? `Steam ${minutesToHours(c.steam_playtime_minutes)}` : "Steam —"}
-                            {" • "}
-                            {hasPsn ? `PSN ${minutesToHours(c.psn_playtime_minutes!)}` : "PSN —"}
-                          </span>
-                        </div>
+                      {(() => {
+                        const steamMin = Number(c.steam_playtime_minutes || 0);
+                        const psnMin = c.psn_playtime_minutes != null ? Number(c.psn_playtime_minutes) : 0;
+                        const xboxGsTotal = Number(c.xbox_gamerscore_total || 0);
+                        const xboxAchTotal = Number(c.xbox_achievements_total || 0);
 
-                        <div style={{ color: "#64748b" }}>
-                          <b>Completion signals</b>{" "}
-                          <span style={{ color: "#0f172a" }}>
-                            {showPsnTrophies
-                              ? `PSN trophies ${Math.round(c.psn_trophy_progress!)}%`
-                              : "PSN trophies —"}
-                            {" • "}
-                            {showXboxGS
-                              ? `Xbox GS ${c.xbox_gamerscore_earned}/${c.xbox_gamerscore_total}`
-                              : "Xbox GS —"}
-                          </span>
-                        </div>
+                        return (
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 12,
+                              flexWrap: "wrap",
+                              marginTop: 8,
+                              fontSize: 13,
+                              color: "#0f172a",
+                            }}
+                          >
+                            {steamMin > 0 && (
+                              <span title="Steam playtime">🎮 {minutesToHours(steamMin)}</span>
+                            )}
 
-                        <div style={{ color: "#64748b" }}>
-                          <b>Achievements</b>{" "}
-                          <span style={{ color: "#0f172a" }}>
-                            {c.xbox_achievements_total && c.xbox_achievements_total > 0
-                              ? `${c.xbox_achievements_earned}/${c.xbox_achievements_total}`
-                              : "—"}
-                          </span>
-                        </div>
-                      </div>
+                            {psnMin > 0 && (
+                              <span title="PlayStation playtime">🕹️ {minutesToHours(psnMin)}</span>
+                            )}
+
+                            {c.psn_trophy_progress != null && (
+                              <span title="PlayStation trophy progress">🏆 {Math.round(Number(c.psn_trophy_progress))}%</span>
+                            )}
+
+                            {xboxGsTotal > 0 && (
+                              <span title="Xbox gamerscore">
+                                ✖︎ {Number(c.xbox_gamerscore_earned ?? 0)}/{xboxGsTotal}
+                              </span>
+                            )}
+
+                            {xboxAchTotal > 0 && (
+                              <span title="Xbox achievements">
+                                🏅 {Number(c.xbox_achievements_earned ?? 0)}/{xboxAchTotal}
+                              </span>
+                            )}
+
+                            {/* If literally nothing exists, show a placeholder */}
+                            {steamMin <= 0 &&
+                              psnMin <= 0 &&
+                              c.psn_trophy_progress == null &&
+                              xboxGsTotal <= 0 &&
+                              xboxAchTotal <= 0 && (
+                                <span style={{ color: "#64748b" }}>No activity data yet</span>
+                              )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 );

@@ -194,35 +194,65 @@ async function ensureReleaseForPsnTitle(opts: {
   if (gErr || !gameRow?.id) throw new Error(`Failed to upsert game: ${gErr?.message || "unknown"}`);
   const gameId = gameRow.id;
 
-  // 3) Insert release (platform_key = psn, platform_label = PS5/PS4 etc)
-  const releaseInsert: any = {
-    game_id: gameId,
-    display_title: titleName.trim(),
-    platform_key: "psn",
-    platform_name: "PlayStation",
-    platform_label: platformLabel,
-    cover_url: null,
-  };
-
-  const { data: releaseRow, error: rErr } = await admin
+  // 3) Check if release already exists before inserting
+  const { data: existingRelease, error: findErr } = await admin
     .from("releases")
-    .insert(releaseInsert)
     .select("id")
-    .single();
+    .eq("platform_key", "psn")
+    .eq("display_title", titleName.trim())
+    .eq("platform_label", platformLabel)
+    .maybeSingle();
 
-  if (rErr || !releaseRow?.id) throw new Error(`Failed to insert release: ${rErr?.message || "unknown"}`);
+  if (findErr) throw new Error(`Failed to check existing release: ${findErr.message}`);
 
-  const releaseId = String(releaseRow.id);
+  let releaseId: string;
 
-  // 4) Insert mapping (unique source+external_id prevents duplicates forever)
-  const { error: insMapErr } = await admin.from("release_external_ids").insert({
-    release_id: releaseId,
-    source: "psn",
-    external_id: psnExternalId,
-    external_id_type: psnExternalId.startsWith("synthetic:") ? "synthetic" : "np_communication_id",
-  });
+  if (existingRelease?.id) {
+    // Release already exists, just use it
+    releaseId = String(existingRelease.id);
+  } else {
+    // Insert new release (platform_key = psn, platform_label = PS5/PS4 etc)
+    const releaseInsert: any = {
+      game_id: gameId,
+      display_title: titleName.trim(),
+      platform_key: "psn",
+      platform_name: "PlayStation",
+      platform_label: platformLabel,
+      cover_url: null,
+    };
 
-  if (insMapErr) throw new Error(`Failed to insert release_external_ids row: ${insMapErr.message}`);
+    const { data: releaseRow, error: rErr } = await admin
+      .from("releases")
+      .insert(releaseInsert)
+      .select("id")
+      .single();
+
+    if (rErr || !releaseRow?.id) throw new Error(`Failed to insert release: ${rErr?.message || "unknown"}`);
+
+    releaseId = String(releaseRow.id);
+  }
+
+  // 4) Ensure mapping exists (idempotent)
+  const { data: existingMap } = await admin
+    .from("release_external_ids")
+    .select("release_id")
+    .eq("source", "psn")
+    .eq("external_id", psnExternalId)
+    .maybeSingle();
+
+  if (!existingMap) {
+    const { error: insMapErr } = await admin.from("release_external_ids").insert({
+      release_id: releaseId,
+      source: "psn",
+      external_id: psnExternalId,
+      external_id_type: psnExternalId.startsWith("synthetic:") ? "synthetic" : "np_communication_id",
+    });
+
+    if (insMapErr) {
+      // Don't hard-fail on mapping insert (release is already created)
+      console.error(`Warning: Failed to insert release_external_ids: ${insMapErr.message}`);
+    }
+  }
 
   return releaseId;
 }
