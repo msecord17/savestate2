@@ -5,12 +5,18 @@ import Link from "next/link";
 
 export default function PlayStationConnectPage() {
   const [npsso, setNpsso] = useState("");
+  const [onlineId, setOnlineId] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
   async function connect() {
     if (!npsso.trim()) {
       setMsg("Please paste your NPSSO token.");
+      return;
+    }
+
+    if (!onlineId.trim()) {
+      setMsg("Please enter your PSN Online ID.");
       return;
     }
 
@@ -21,7 +27,7 @@ export default function PlayStationConnectPage() {
       const res = await fetch("/api/auth/psn/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ npsso: npsso.trim() }),
+        body: JSON.stringify({ npsso: npsso.trim(), onlineId: onlineId.trim() }),
       });
 
       const text = await res.text();
@@ -60,6 +66,23 @@ export default function PlayStationConnectPage() {
           marginBottom: 24,
         }}
       >
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>
+          PSN Online ID
+        </div>
+
+        <input
+          value={onlineId}
+          onChange={(e) => setOnlineId(e.target.value)}
+          placeholder="Your PlayStation username"
+          style={{
+            width: "100%",
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid #e5e7eb",
+            marginBottom: 16,
+          }}
+        />
+
         <div style={{ fontWeight: 900, marginBottom: 6 }}>
           NPSSO Token
         </div>
@@ -109,7 +132,7 @@ export default function PlayStationConnectPage() {
   }}
 >
   <h2 style={{ fontSize: 18, fontWeight: 900, marginBottom: 8 }}>
-    🔐 How to get your NPSSO token
+    🔐 How to connect
   </h2>
 
   <p style={{ color: "#334155", marginBottom: 12 }}>
@@ -117,6 +140,17 @@ export default function PlayStationConnectPage() {
     SaveState to <strong>read your own PlayStation library and play history</strong>.
     We never see your password, and this is read-only.
   </p>
+
+  <div style={{ marginBottom: 14 }}>
+    <strong style={{ color: "#334155" }}>Step 1: Enter your PSN Online ID</strong>
+    <p style={{ color: "#64748b", fontSize: 14, marginTop: 4 }}>
+      This is your PlayStation username (e.g., "gamer123").
+    </p>
+  </div>
+
+  <div style={{ marginBottom: 8 }}>
+    <strong style={{ color: "#334155" }}>Step 2: Get your NPSSO token</strong>
+  </div>
 
   <ol style={{ paddingLeft: 18, color: "#334155", lineHeight: 1.6 }}>
     <li>

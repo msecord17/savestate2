@@ -24,7 +24,7 @@ export default function MyPortfolioPage() {
   const [rows, setRows] = useState<PortfolioRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-  const [sourceFilter, setSourceFilter] = useState<"all" | "steam" | "ra" | "manual">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "steam" | "psn" | "xbox" | "ra" | "manual">("all");
 
   const [myLists, setMyLists] = useState<any[]>([]);
   const [listCounts, setListCounts] = useState<Record<string, number>>({});
@@ -78,11 +78,15 @@ export default function MyPortfolioPage() {
         const key = (rel?.platform_key || "").toLowerCase();
 
         const isSteam = key === "steam";
+        const isPSN = key === "psn";
+        const isXbox = key === "xbox";
         const isRA = key === "retroachievements" || key === "ra";
-        // Manual = anything that's NOT steam and NOT retroachievements/ra
-        const isManual = !isSteam && !isRA;
+        // Manual = anything that's NOT steam, PSN, Xbox, and NOT retroachievements/ra
+        const isManual = !isSteam && !isPSN && !isXbox && !isRA;
 
         if (sourceFilter === "steam" && !isSteam) return false;
+        if (sourceFilter === "psn" && !isPSN) return false;
+        if (sourceFilter === "xbox" && !isXbox) return false;
         if (sourceFilter === "ra" && !isRA) return false;
         if (sourceFilter === "manual" && !isManual) return false;
       }
@@ -128,6 +132,8 @@ export default function MyPortfolioPage() {
         {[
           { key: "all", label: "All" },
           { key: "steam", label: "Steam" },
+          { key: "psn", label: "PlayStation" },
+          { key: "xbox", label: "Xbox" },
           { key: "ra", label: "RetroAchievements" },
           { key: "manual", label: "Manual" },
         ].map((b) => (
@@ -211,6 +217,40 @@ export default function MyPortfolioPage() {
       title="Synced from Steam"
     >
       Steam
+    </div>
+  )}
+
+  {rel?.platform_key === "psn" && (
+    <div
+      style={{
+        fontSize: 12,
+        padding: "3px 8px",
+        borderRadius: 999,
+        border: "1px solid #e5e7eb",
+        background: "white",
+        color: "#0f172a",
+        lineHeight: 1.2,
+      }}
+      title="Synced from PlayStation"
+    >
+      PlayStation
+    </div>
+  )}
+
+  {rel?.platform_key === "xbox" && (
+    <div
+      style={{
+        fontSize: 12,
+        padding: "3px 8px",
+        borderRadius: 999,
+        border: "1px solid #e5e7eb",
+        background: "white",
+        color: "#0f172a",
+        lineHeight: 1.2,
+      }}
+      title="Synced from Xbox"
+    >
+      Xbox
     </div>
   )}
 </div>

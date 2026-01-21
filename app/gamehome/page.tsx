@@ -141,11 +141,21 @@ export default function GameHomePage() {
 
     if (platform !== "all") {
       out = out.filter((c) => {
-        if (splitByPlatform) {
-          const p = (c.platform_label || c.platform_name || c.platform_key || "").trim();
-          return p === platform;
+        // release mode → trust platform_key / label
+        if (c.platform_key) {
+          return (
+            c.platform_key === platform ||
+            c.platform_label === platform ||
+            c.platform_name === platform
+          );
         }
-        return Array.isArray(c.platforms) ? c.platforms.includes(platform) : false;
+
+        // game mode fallback
+        if (Array.isArray(c.platforms)) {
+          return c.platforms.includes(platform);
+        }
+
+        return false;
       });
     }
 
@@ -348,14 +358,28 @@ export default function GameHomePage() {
                       background: "#fff",
                     }}
                   >
-                    <div
-                      style={{
-                        height: 140,
-                        background: c.cover_url
-                          ? `center / cover no-repeat url(${c.cover_url})`
-                          : "linear-gradient(135deg, #0f172a, #334155)",
-                      }}
-                    />
+                    {c.release_id ? (
+                      <Link
+                        href={`/releases/${c.release_id}`}
+                        style={{
+                          display: "block",
+                          height: 140,
+                          background: c.cover_url
+                            ? `center / cover no-repeat url(${c.cover_url})`
+                            : "linear-gradient(135deg, #0f172a, #334155)",
+                          cursor: "pointer",
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          height: 140,
+                          background: c.cover_url
+                            ? `center / cover no-repeat url(${c.cover_url})`
+                            : "linear-gradient(135deg, #0f172a, #334155)",
+                        }}
+                      />
+                    )}
 
                     <div style={{ padding: 12 }}>
                       {/* Title */}

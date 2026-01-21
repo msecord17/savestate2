@@ -7,6 +7,7 @@ import {
   getPsnAccountId,
   getUserPlayedGames,
   getUserTrophyTitlesPaged,
+  getUserTrophyGroupsForTitle,
 } from "@/lib/psn/server";
 
 /**
@@ -89,12 +90,13 @@ async function mergeUpsertPsnTitle(
     trophies_total?: number | null;
     last_updated_at?: string | null;
     release_id?: string | null;
+    title_icon_url?: string | null;
   }
 ) {
   const { data: existing, error: exErr } = await supabase
     .from("psn_title_progress")
     .select(
-      "user_id, np_communication_id, title_name, title_platform, playtime_minutes, trophy_progress, trophies_earned, trophies_total, last_updated_at, release_id"
+      "user_id, np_communication_id, title_name, title_platform, playtime_minutes, trophy_progress, trophies_earned, trophies_total, last_updated_at, release_id, title_icon_url"
     )
     .eq("user_id", userId)
     .eq("np_communication_id", key)
@@ -142,6 +144,8 @@ async function mergeUpsertPsnTitle(
 
     // release_id should be sticky once set
     release_id: patch.release_id ?? current?.release_id ?? null,
+
+    title_icon_url: patch.title_icon_url ?? current?.title_icon_url ?? null,
 
     last_updated_at: nextUpdatedAt,
   };
@@ -299,7 +303,7 @@ export async function POST() {
     // 1) Load NPSSO + cached account id
     const { data: profile, error: pErr } = await supabaseUser
       .from("profiles")
-      .select("psn_npsso, psn_account_id")
+      .select("psn_npsso, psn_account_id, psn_online_id")
       .eq("user_id", user.id)
       .maybeSingle();
 
@@ -318,8 +322,10 @@ export async function POST() {
 
     // 3) Resolve account id
     let accountId = profile?.psn_account_id ? String(profile.psn_account_id) : null;
+    const onlineId = String(profile?.psn_online_id ?? "").trim();
+
     if (!accountId) {
-      accountId = await getPsnAccountId(accessToken);
+      accountId = await getPsnAccountId(accessToken, onlineId);
       if (!accountId) {
         return NextResponse.json({ error: "Failed to resolve PSN account id" }, { status: 500 });
       }
@@ -424,6 +430,8 @@ export async function POST() {
 
       releasesTouched += 1;
 
+      const iconUrl = String(t?.trophyTitleIconUrl ?? "").trim() || null;
+
       const res = await mergeUpsertPsnTitle(supabaseUser, user.id, key, {
         title_name: titleName,
         title_platform: platformLabel,
@@ -432,12 +440,92 @@ export async function POST() {
         trophies_total: trophiesTotal,
         last_updated_at: toIsoOrNow(t?.lastUpdatedDateTime),
         release_id: releaseId,
+        title_icon_url: iconUrl,
       });
 
       if (res.ok && res.inserted) trophyImported += 1;
       if (res.ok && res.updated) trophyUpdated += 1;
 
       await ensurePortfolioEntry(supabaseUser, user.id, releaseId);
+    }
+
+    // ------------------------------------------------------------
+    // C) Trophy group chips (Minimap-style)
+    // ------------------------------------------------------------
+    let groupImported = 0;
+    let groupUpdated = 0;
+
+    // We only do this for titles that have a real npCommunicationId.
+    // Synthetic IDs won't work for this endpoint.
+    const realNpIds = trophyRows
+      .map((t: any) => String(t?.npCommunicationId ?? "").trim())
+      .filter(Boolean);
+
+    // De-dupe
+    const uniqNpIds = Array.from(new Set(realNpIds));
+
+    for (const npId of uniqNpIds) {
+      try {
+        const groups = await getUserTrophyGroupsForTitle(accessToken, accountId, npId);
+
+        if (!Array.isArray(groups) || groups.length === 0) {
+          console.log(`[PSN Sync] No trophy groups returned for ${npId}`);
+          continue;
+        }
+
+        for (const g of groups as any[]) {
+          const trophy_group_id = String(g?.trophyGroupId ?? "").trim() || "default";
+          const trophy_group_name = String(g?.trophyGroupName ?? "").trim() || null;
+          const trophy_group_icon_url = String(g?.trophyGroupIconUrl ?? "").trim() || null;
+
+          const progress = g?.progress != null ? Number(g.progress) : null;
+
+          const earnedObj = g?.earnedTrophies;
+          const earned =
+            earnedObj
+              ? Number(earnedObj.bronze || 0) +
+                Number(earnedObj.silver || 0) +
+                Number(earnedObj.gold || 0) +
+                Number(earnedObj.platinum || 0)
+              : null;
+
+          const definedObj = g?.definedTrophies;
+          const total =
+            definedObj
+              ? Number(definedObj.bronze || 0) +
+                Number(definedObj.silver || 0) +
+                Number(definedObj.gold || 0) +
+                Number(definedObj.platinum || 0)
+              : null;
+
+          // Upsert the chip row
+          const { error: upErr } = await supabaseUser
+            .from("psn_trophy_group_progress")
+            .upsert(
+              {
+                user_id: user.id,
+                np_communication_id: npId,
+                trophy_group_id,
+                trophy_group_name,
+                trophy_group_icon_url,
+                progress,
+                earned,
+                total,
+                last_updated_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,np_communication_id,trophy_group_id" }
+            );
+
+          if (!upErr) {
+            groupImported += 1;
+          } else {
+            console.error(`[PSN Sync] Failed to upsert trophy group for ${npId}:`, upErr);
+          }
+        }
+      } catch (err: any) {
+        console.error(`[PSN Sync] Error fetching trophy groups for ${npId}:`, err?.message || err);
+        // Continue with other titles even if one fails
+      }
     }
 
     // 4) Update profile stamps
@@ -463,9 +551,10 @@ export async function POST() {
       ok: true,
       played: { imported: playedImported, updated: playedUpdated, total: playedRows.length },
       trophies: { imported: trophyImported, updated: trophyUpdated, total: trophyRows.length },
+      trophy_groups: { imported: groupImported, unique_titles: uniqNpIds.length },
       total: lastCount,
       releases_touched: releasesTouched,
-      note: "This sync now also maps PSN titles into releases + release_external_ids, and ensures portfolio_entries exists.",
+      note: "This sync now also maps PSN titles into releases + release_external_ids, ensures portfolio_entries exists, and imports trophy group chips.",
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "PSN sync failed" }, { status: 500 });

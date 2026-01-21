@@ -104,15 +104,25 @@ export async function getPsnAccessTokenFromNpsso(npsso: string): Promise<string 
 }
 
 /**
- * Get account ID from access token (for sync route)
- * Note: Many PSN endpoints accept "me" instead of accountId.
- * This is a simplified implementation - ideally you'd resolve the real accountId
- * using the user's onlineId, but "me" works for most endpoints.
+ * Get account ID from access token and onlineId (for sync route)
  */
-export async function getPsnAccountId(accessToken: string): Promise<string | null> {
-  // For now, return "me" which works for most PSN API endpoints
-  // The sync route can use this, and many PSN endpoints accept "me" as the accountId
-  return "me";
+export async function getPsnAccountId(
+  accessToken: string,
+  onlineId: string
+): Promise<string | null> {
+  try {
+    const authorization = { accessToken } as any;
+    const q = (onlineId || "").trim();
+    if (!q) throw new Error("Missing PSN onlineId");
+
+    const res = await makeUniversalSearch(authorization, q, "SocialAllAccounts");
+    const accountId =
+      res?.domainResponses?.[0]?.results?.[0]?.socialMetadata?.accountId ?? null;
+
+    return accountId ? String(accountId) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -140,3 +150,5 @@ export async function getUserTrophyTitlesPaged(
   // getUserTitles returns { trophyTitles: [...] }
   return (result as any)?.trophyTitles || [];
 }
+
+export { getUserTrophyGroupsForTitle } from "./trophy-groups";

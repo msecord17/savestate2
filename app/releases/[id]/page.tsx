@@ -132,9 +132,15 @@ export default function ReleaseDetailPage() {
     psn: null,
     xbox: null,
   });
+  const [psnGroups, setPsnGroups] = useState<any[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+
+  // Trophy state
+  const [trophies, setTrophies] = useState<any[]>([]);
+  const [loadingTrophies, setLoadingTrophies] = useState(false);
+  const [trophyMsg, setTrophyMsg] = useState("");
 
   // For actions
   const [myLists, setMyLists] = useState<any[]>([]);
@@ -182,11 +188,13 @@ export default function ReleaseDetailPage() {
           xbox: null,
         }
       );
+      setPsnGroups(Array.isArray((data as any)?.psnGroups) ? (data as any).psnGroups : []);
     } catch (e: any) {
       setErr(e?.message || "Failed to load release");
       setRelease(null);
       setEntry(null);
       setSignals({ steam: null, psn: null, xbox: null });
+      setPsnGroups([]);
     } finally {
       setLoading(false);
     }
@@ -604,6 +612,42 @@ export default function ReleaseDetailPage() {
             </div>
 
             {/* TODO slots (we’ll wire these next): Tags, Media, Related games, etc */}
+            {/* Trophy groups (only shown if game has DLC with separate trophy lists) */}
+            {psnGroups.length > 0 && (
+              <div
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 16,
+                  background: "white",
+                  padding: 16,
+                }}
+              >
+                <div style={{ fontWeight: 1000, marginBottom: 10 }}>DLC Trophy Progress</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {psnGroups.map((g: any) => (
+                    <span
+                      key={String(g.trophy_group_id)}
+                      style={{
+                        fontSize: 12,
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                        border: "1px solid #e5e7eb",
+                        background: "white",
+                        color: "#0f172a",
+                        fontWeight: 800,
+                      }}
+                      title={g.trophy_group_name || `Group ${g.trophy_group_id}`}
+                    >
+                      🏆 {g.progress != null ? `${Math.round(Number(g.progress))}%` : "—"}{" "}
+                      <span style={{ color: "#64748b", fontWeight: 700 }}>
+                        ({g.earned ?? 0}/{g.total ?? 0})
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{ color: "#64748b", fontSize: 13 }}>
               Next: tags (emoji), developer/publisher pages, and media carousel like GameTrack.
             </div>

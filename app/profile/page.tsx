@@ -100,9 +100,20 @@ export default function ProfilePage() {
         return;
       }
 
-      window.alert(
-        `${label} sync OK ✅\nImported: ${data?.imported ?? 0}\nUpdated: ${data?.updated ?? 0}\nTotal: ${data?.total ?? 0}`
-      );
+      // Special handling for PSN sync (has nested structure)
+      if (data?.trophy_groups) {
+        window.alert(
+          `${label} sync OK ✅\n\n` +
+            `Played games: ${data.played?.total ?? 0} (${data.played?.imported ?? 0} new)\n` +
+            `Trophy titles: ${data.trophies?.total ?? 0} (${data.trophies?.imported ?? 0} new)\n` +
+            `Trophy groups: ${data.trophy_groups?.imported ?? 0} (from ${data.trophy_groups?.unique_titles ?? 0} titles)\n` +
+            `Releases touched: ${data.releases_touched ?? 0}`
+        );
+      } else {
+        window.alert(
+          `${label} sync OK ✅\nImported: ${data?.imported ?? 0}\nUpdated: ${data?.updated ?? 0}\nTotal: ${data?.total ?? 0}`
+        );
+      }
 
       await load();
     } catch (e: any) {

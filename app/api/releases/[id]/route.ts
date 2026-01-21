@@ -106,6 +106,35 @@ export async function GET(_req: Request, ctx: Ctx) {
       // ignore per-row failures; keep payload stable
     }
 
+    // PSN trophy group chips (only if user is logged in + this release has PSN progress)
+    let psnGroups: any[] = [];
+    let npId: string | null = null;
+    let psnRow: any = null;
+
+    if (user?.id) {
+      // find np_communication_id linked to this release for this user
+      const { data: psnRowData, error: psnErr } = await supabase
+        .from("psn_title_progress")
+        .select("np_communication_id")
+        .eq("user_id", user.id)
+        .eq("release_id", id)
+        .maybeSingle();
+
+      psnRow = psnRowData;
+      npId = String(psnRow?.np_communication_id ?? "").trim() || null;
+
+      if (npId) {
+        const { data: groups } = await supabase
+          .from("psn_trophy_group_progress")
+          .select("trophy_group_id, trophy_group_name, trophy_group_icon_url, progress, earned, total")
+          .eq("user_id", user.id)
+          .eq("np_communication_id", npId)
+          .order("trophy_group_id", { ascending: true });
+
+        psnGroups = Array.isArray(groups) ? groups : [];
+      }
+    }
+
     // ✅ KEY FIX:
     // Only treat portfolio_entries.playtime_minutes as STEAM playtime if this release is a Steam release.
     // This prevents PSN/Xbox releases from incorrectly showing "Steam playtime".
@@ -120,6 +149,7 @@ export async function GET(_req: Request, ctx: Ctx) {
     return NextResponse.json({
       release,
       entry: entry ?? null,
+      psnGroups,
       signals: {
         steam: steamSignal,
         psn: psn
