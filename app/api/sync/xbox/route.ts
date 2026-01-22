@@ -95,6 +95,29 @@ export async function POST(req: Request) {
     const xuid = titlesJson?.xuid ?? null;
     const gamertag = titlesJson?.gamertag ?? null;
 
+    // Log for debugging - include full debug info from titles endpoint
+    console.log(`[Xbox Sync] Fetched ${titles.length} titles from API`);
+    if (titlesJson?.debug) {
+      console.log(`[Xbox Sync] Debug info from titles API:`, titlesJson.debug);
+    }
+
+    if (titles.length === 0) {
+      return NextResponse.json({
+        ok: true,
+        imported: 0,
+        updated: 0,
+        total: 0,
+        xuid,
+        gamertag,
+        warning: "No titles returned from Xbox API. This might mean: 1) No games with achievements, 2) API pagination issue, or 3) API returned empty response.",
+        debug: {
+          titlesJsonKeys: titlesJson ? Object.keys(titlesJson) : [],
+          titlesApiDebug: titlesJson?.debug,
+          rawResponse: titlesJson,
+        },
+      });
+    }
+
     // Admin client for catalog writes
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -103,12 +126,21 @@ export async function POST(req: Request) {
 
     let imported = 0;
     let updated = 0;
+    let errors: string[] = [];
 
     for (const t of titles) {
       const title = String(t.name || "").trim();
       if (!title) continue;
 
-      const xboxTitleId = String(t.titleId || t.pfTitleId || "").trim();
+      // titleId must be numeric for achievements API to work
+      const rawTitleId = t.titleId || t.pfTitleId;
+      const xboxTitleId = rawTitleId != null ? String(rawTitleId).trim() : "";
+      
+      // Skip if no valid numeric titleId (we can't fetch achievements without it)
+      if (!xboxTitleId || isNaN(Number(xboxTitleId))) {
+        console.warn(`[Xbox Sync] Skipping ${title} - no valid titleId (got: ${rawTitleId})`);
+        continue;
+      }
 
       // Find existing release
       let existingRelease: any = null;
@@ -143,10 +175,10 @@ export async function POST(req: Request) {
           .single();
 
         if (gErr || !gameRow?.id) {
-          return NextResponse.json(
-            { error: `Failed to upsert game for ${title}: ${gErr?.message || "unknown"}` },
-            { status: 500 }
-          );
+          const errMsg = `Failed to upsert game for ${title}: ${gErr?.message || "unknown"}`;
+          console.error(`[Xbox Sync] ${errMsg}`);
+          errors.push(errMsg);
+          continue; // Skip this title instead of failing the whole sync
         }
 
         const releaseInsert: any = {
@@ -166,10 +198,10 @@ export async function POST(req: Request) {
           .single();
 
         if (rErr || !newRelease?.id) {
-          return NextResponse.json(
-            { error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` },
-            { status: 500 }
-          );
+          const errMsg = `Failed to insert release for ${title}: ${rErr?.message || "unknown"}`;
+          console.error(`[Xbox Sync] ${errMsg}`);
+          errors.push(errMsg);
+          continue; // Skip this title instead of failing the whole sync
         }
 
         releaseId = newRelease.id;
@@ -202,7 +234,7 @@ export async function POST(req: Request) {
         .upsert(
           {
             user_id: user.id,
-            title_id: xboxTitleId || title, // fallback if no ID
+            title_id: xboxTitleId, // Must be numeric (validated above)
             title_name: title,
             title_platform: "Xbox",
             achievements_earned: t.achievements_earned ?? null,
@@ -247,8 +279,15 @@ export async function POST(req: Request) {
       imported,
       updated,
       total: titles.length,
+      processed: imported + updated,
       xuid,
       gamertag,
+      errors: errors.length > 0 ? errors : undefined,
+      warning: errors.length > 0 ? `${errors.length} titles failed to sync` : undefined,
+      debug: {
+        titlesApiDebug: titlesJson?.debug,
+        titleNames: titles.map((t) => t.name),
+      },
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Xbox sync failed" }, { status: 500 });

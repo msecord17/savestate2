@@ -21,7 +21,7 @@ export async function GET(
     .from("lists")
     .select("id, title, name, description, is_curated, user_id, created_at")
     .eq("id", listId)
-    .single();
+    .maybeSingle();
 
   if (lErr) return NextResponse.json({ error: lErr.message }, { status: 500 });
   if (!list) return NextResponse.json({ error: "List not found" }, { status: 404 });

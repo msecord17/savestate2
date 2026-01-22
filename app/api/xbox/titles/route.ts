@@ -148,39 +148,166 @@ async function fetchProfile(authorization: string) {
 }
 
 // 4) Achievements history titles (earned/total + gamerscore)
+// Note: This endpoint only returns games that have achievements.
+// It supports pagination via continuationToken.
+// IMPORTANT: Xbox 360 uses contract version 1, Xbox One/Series uses version 2
+// We need to query BOTH to get all games!
 async function fetchAchievementHistoryTitles(authorization: string, xuid: string) {
-  // This endpoint returns per-title achievement + gamerscore totals.
-  // maxItems can be big; 500 covers most people.
-  const url = `https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(
-    xuid
-  )})/history/titles?maxItems=500`;
+  const allTitles: any[] = [];
+  const platformDebugs: any[] = [];
+  
+  // Fetch from both Xbox 360 (v1) and Xbox One/Series (v2)
+  const platforms = [
+    { version: "1", name: "Xbox 360" },
+    { version: "2", name: "Xbox One/Series" },
+  ];
+  
+  for (const platform of platforms) {
+    try {
+    let continuationToken: string | null = null;
+    let pageCount = 0;
+    const maxPages = 20; // Safety limit per platform
+    let platformTitlesCount = 0; // Track titles for this platform
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: authorization,
-      "x-xbl-contract-version": "2",
-      "Accept-Language": "en-US",
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
+    do {
+      pageCount++;
+      if (pageCount > maxPages) {
+        console.warn(`[Xbox ${platform.name}] Hit max pages (${maxPages}), stopping pagination`);
+        break;
+      }
 
-  const text = await res.text();
-  const json = jsonOrNull(text);
+      let url = `https://achievements.xboxlive.com/users/xuid(${encodeURIComponent(
+        xuid
+      )})/history/titles?maxItems=500`;
+      
+      // Try both query param and header for continuation token
+      const headers: Record<string, string> = {
+        Authorization: authorization,
+        "x-xbl-contract-version": platform.version,
+        "Accept-Language": "en-US",
+        Accept: "application/json",
+      };
+      
+      if (continuationToken) {
+        // Try as query parameter first
+        url += `&continuationToken=${encodeURIComponent(continuationToken)}`;
+        // Also try as header (some APIs use this)
+        headers["X-Continuation-Token"] = continuationToken;
+      }
 
-  if (!res.ok) {
-    return {
-      ok: false as const,
-      status: res.status,
-      error: `Achievements history/titles failed (${res.status})`,
-      detail: json ?? text,
+    const res = await fetch(url, {
+      method: "GET",
+      headers,
+      cache: "no-store",
+    });
+
+    const text = await res.text();
+    const json = jsonOrNull(text);
+
+    // Check for continuation token in headers too
+    const headerContinuationToken = res.headers.get("X-Continuation-Token") ?? 
+                                    res.headers.get("x-continuation-token") ??
+                                    res.headers.get("Continuation-Token") ??
+                                    null;
+
+    if (!res.ok) {
+      console.error(`[Xbox ${platform.name}] API error (${res.status}):`, json ?? text);
+      // Don't fail the whole thing - continue to next platform
+      break;
+    }
+
+    // Debug: log response structure (always log first page per platform)
+    const debugInfo: any = {
+      platform: platform.name,
+      contractVersion: platform.version,
+      page: pageCount,
+      topLevelKeys: json ? Object.keys(json) : [],
+      titlesCount: Array.isArray(json?.titles) ? json.titles.length : 0,
+      hasPagingInfo: !!json?.pagingInfo,
+      pagingInfoKeys: json?.pagingInfo ? Object.keys(json.pagingInfo) : [],
+      pagingInfo: json?.pagingInfo ? JSON.parse(JSON.stringify(json.pagingInfo)) : null, // Deep clone to show full object
+      headerContinuationToken: headerContinuationToken,
+      allResponseHeaders: Object.fromEntries(res.headers.entries()),
+      fullJsonSample: JSON.stringify(json).slice(0, 2000), // First 2000 chars of full response
     };
-  }
+    
+    if (pageCount === 1) {
+      // Store first page debug for this platform
+      platformDebugs.push(debugInfo);
+      console.log(`[Xbox ${platform.name}] Page ${pageCount} response structure:`, JSON.stringify(debugInfo, null, 2));
+    }
 
-  // Typically json.titles is the list
-  const titles = Array.isArray(json?.titles) ? json.titles : [];
-  return { ok: true as const, titles };
+    // Add titles from this page
+    const pageTitles = Array.isArray(json?.titles) ? json.titles : [];
+    allTitles.push(...pageTitles);
+    platformTitlesCount += pageTitles.length;
+
+    // Check for continuation token (can be in different locations)
+    // Xbox API might use different field names - check common variations
+    // Also check response headers
+    // Try all possible field name variations
+    const possibleTokens = [
+      headerContinuationToken,
+      json?.pagingInfo?.continuationToken,
+      json?.pagingInfo?.continuation_token,
+      json?.pagingInfo?.continuation,
+      json?.pagingInfo?.token,
+      json?.pagingInfo?.nextToken,
+      json?.pagingInfo?.next_token,
+      json?.continuationToken,
+      json?.continuation_token,
+      json?.continuation,
+      json?.token,
+      json?.nextToken,
+      json?.next_token,
+    ].filter(Boolean);
+    
+    continuationToken = possibleTokens[0] ?? null;
+    
+    // Also check if pagingInfo has any string values that might be tokens
+    if (!continuationToken && json?.pagingInfo) {
+      const pagingInfo = json.pagingInfo;
+      for (const key in pagingInfo) {
+        const value = pagingInfo[key];
+        if (typeof value === 'string' && value.length > 10) {
+          // Might be a continuation token
+          continuationToken = value;
+          console.log(`[Xbox] Found potential continuation token in pagingInfo.${key}: ${value.substring(0, 50)}...`);
+          break;
+        }
+      }
+    }
+
+    // Log pagination progress
+    console.log(`[Xbox ${platform.name}] Page ${pageCount}: ${pageTitles.length} titles (platform total: ${platformTitlesCount}, all platforms: ${allTitles.length})`);
+    if (continuationToken) {
+      console.log(`[Xbox ${platform.name}] Found continuation token: ${continuationToken.substring(0, 50)}..., fetching next page...`);
+    } else {
+      console.log(`[Xbox ${platform.name}] No continuation token found. Full pagingInfo:`, JSON.stringify(json?.pagingInfo, null, 2));
+      if (json?.pagingInfo) {
+        console.log(`[Xbox ${platform.name}] pagingInfo contents:`, JSON.stringify(json.pagingInfo, null, 2));
+      }
+    }
+    } while (continuationToken);
+    
+    console.log(`[Xbox ${platform.name}] Finished: ${platformTitlesCount} titles from this platform`);
+    } catch (e: any) {
+      console.error(`[Xbox ${platform.name}] Error fetching titles:`, e?.message || e);
+      // Continue to next platform
+    }
+  } // End platform loop
+
+  console.log(`[Xbox] Finished fetching: ${allTitles.length} total titles across all platforms`);
+
+  return {
+    ok: true as const,
+    titles: allTitles,
+    debug: {
+      totalTitles: allTitles.length,
+      platformDebugs: platformDebugs,
+      firstPageDebug: platformDebugs[0] || null,
+    },
+  };
 }
 
 export async function GET() {
@@ -233,7 +360,14 @@ export async function GET() {
 
   // Achievements per title
   const hist = await fetchAchievementHistoryTitles(authorization, xuid);
-  if (!hist.ok) return NextResponse.json({ error: hist.error, detail: hist.detail }, { status: 500 });
+  // Note: fetchAchievementHistoryTitles now always returns ok: true (errors are logged but don't fail)
+
+  // Log raw response for debugging
+  console.log(`[Xbox Titles API] Raw titles count: ${hist.titles.length}`);
+  console.log(`[Xbox Titles API] Fetch debug:`, hist.debug);
+  if (hist.titles.length > 0) {
+    console.log(`[Xbox Titles API] First title sample:`, JSON.stringify(hist.titles[0]).slice(0, 500));
+  }
 
   // Normalize titles for sync route
   const titles: TitleOut[] = (hist.titles as any[]).map((t) => {
@@ -305,5 +439,13 @@ export async function GET() {
     gamertag,
     gamerscore: null, // optional aggregate; you can compute later
     titles,
+    debug: {
+      totalTitles: titles.length,
+      titlesWithAchievements: titles.filter((t) => (t.achievements_total ?? 0) > 0).length,
+      titlesWithGamerscore: titles.filter((t) => (t.gamerscore_total ?? 0) > 0).length,
+      rawTitlesCount: hist.titles.length,
+      titleNames: titles.map((t) => t.name).slice(0, 10), // First 10 for debugging
+      fetchDebug: hist.debug, // Include pagination debug info
+    },
   });
 }

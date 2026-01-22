@@ -64,9 +64,10 @@ export async function psnGetTitleTrophyDetails(
   npCommunicationId: string,
   trophyTitlePlatform: string
 ) {
+  const isPs5 = String(trophyTitlePlatform || "").toUpperCase().includes("PS5");
+
   const opts = {
-    // psn-api docs recommend this for non-PS5 titles
-    npServiceName: (trophyTitlePlatform.includes("PS5") ? undefined : "trophy") as "trophy" | "trophy2" | undefined,
+    npServiceName: (isPs5 ? "trophy2" : "trophy") as "trophy" | "trophy2",
   };
 
   const { trophies: titleTrophies } = await getTitleTrophies(

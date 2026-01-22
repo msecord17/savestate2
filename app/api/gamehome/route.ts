@@ -268,14 +268,17 @@ export async function GET(req: Request) {
       const psn = psnByRelease[rid] ?? null;
       const xb = xboxByRelease[rid] ?? null;
 
-      // Steam is ONLY valid if this release itself is Steam
-      const isSteamRelease = rel.platform_key === "steam";
-
-      // Until steam_title_progress exists, steam minutes are undefined for non-steam
-      const steamMinutes = isSteamRelease ? Number(r?.playtime_minutes || 0) : 0;
+      // IMPORTANT:
+      // portfolio_entries.playtime_minutes should ONLY be treated as Steam playtime
+      // when the release itself is a Steam release.
+           // IMPORTANT:
+      // portfolio_entries.playtime_minutes is ONLY reliable as Steam playtime
+      // when the release itself is Steam.
+      const isSteamRelease = String(rel.platform_key ?? "").toLowerCase() === "steam";
+      const steamMinutes = isSteamRelease ? Number(r?.playtime_minutes ?? 0) : 0;
 
       const sources: string[] = [];
-      if (isSteamRelease) sources.push("Steam");
+      if (steamMinutes > 0) sources.push("Steam");
       if (psn) sources.push("PSN");
       if (xb) sources.push("Xbox");
 

@@ -75,9 +75,10 @@ export async function GET() {
   const user = userRes.user;
 
   // 1) Portfolio (Steam playtime + completion statuses)
+  // IMPORTANT: Only count playtime_minutes as Steam playtime when platform_key = 'steam'
   const { data: entries, error: eErr } = await supabase
     .from("portfolio_entries")
-    .select("release_id, status, playtime_minutes")
+    .select("release_id, status, playtime_minutes, releases:release_id(platform_key)")
     .eq("user_id", user.id);
 
   if (eErr) return NextResponse.json({ error: eErr.message }, { status: 500 });
@@ -94,7 +95,12 @@ export async function GET() {
     const s = String(r.status || "owned");
     completionPoints += STATUS_POINTS[s] ?? 6;
     if (s === "completed") completedCount += 1;
-    totalSteamPlaytimeMinutes += Number(r.playtime_minutes || 0);
+    
+    // Only count playtime_minutes as Steam if the release is a Steam release
+    const platformKey = r?.releases?.platform_key;
+    if (String(platformKey ?? "").toLowerCase() === "steam") {
+      totalSteamPlaytimeMinutes += Number(r.playtime_minutes || 0);
+    }
   }
 
   // 2) RetroAchievements (weighted)

@@ -70,6 +70,15 @@ function pillStyle(bg: string) {
   };
 }
 
+function cardPlatformLabel(c: any) {
+  return (
+    (c.platform_label && String(c.platform_label)) ||
+    (c.platform_name && String(c.platform_name)) ||
+    (c.platform_key && String(c.platform_key)) ||
+    "Unknown"
+  );
+}
+
 export default function GameHomePage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -112,14 +121,10 @@ export default function GameHomePage() {
 
     for (const c of cards) {
       if (splitByPlatform) {
-        const p = (c.platform_label || c.platform_name || c.platform_key || "").trim();
-        if (p) set.add(p);
+        set.add(cardPlatformLabel(c));
       } else {
-        if (Array.isArray(c.platforms)) {
-          c.platforms.forEach((p) => {
-            const v = String(p || "").trim();
-            if (v) set.add(v);
-          });
+        if (Array.isArray((c as any).platforms)) {
+          (c as any).platforms.forEach((p: string) => set.add(p));
         }
       }
     }
@@ -140,22 +145,11 @@ export default function GameHomePage() {
     let out = cards.slice();
 
     if (platform !== "all") {
-      out = out.filter((c) => {
-        // release mode → trust platform_key / label
-        if (c.platform_key) {
-          return (
-            c.platform_key === platform ||
-            c.platform_label === platform ||
-            c.platform_name === platform
-          );
+      out = out.filter((c: any) => {
+        if (splitByPlatform) {
+          return cardPlatformLabel(c) === platform;
         }
-
-        // game mode fallback
-        if (Array.isArray(c.platforms)) {
-          return c.platforms.includes(platform);
-        }
-
-        return false;
+        return Array.isArray(c.platforms) ? c.platforms.includes(platform) : false;
       });
     }
 

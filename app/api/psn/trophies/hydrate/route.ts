@@ -75,12 +75,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "No np_communication_id found for this release_id" }, { status: 400 });
     }
 
-    // Important: PS4/PS3/Vita often require npServiceName: "trophy"
+    // Important: PS5 requires "trophy2", PS4/PS3/Vita require "trophy"
+    const isPs5 = String(trophyTitlePlatform || "").toUpperCase().includes("PS5");
     const opts = {
-      npServiceName: (trophyTitlePlatform.includes("PS5") ? undefined : "trophy") as
-        | "trophy"
-        | "trophy2"
-        | undefined,
+      npServiceName: (isPs5 ? "trophy2" : "trophy") as "trophy" | "trophy2",
     };
 
     // 1) Groups (includes "default" base game)
