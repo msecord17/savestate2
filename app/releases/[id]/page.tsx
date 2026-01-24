@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
+
 type ReleaseDetail = {
   id: string;
   display_title: string | null;
@@ -48,6 +49,27 @@ type Portfolio = null | {
   status: string | null;
   playtime_minutes: number | null; // you treat as Steam minutes today
   updated_at: string | null;
+};
+
+type Trophy = {
+  trophyId: number;
+  name: string;
+  description: string;
+  iconUrl: string | null;
+  earned: boolean;
+  earnedAt: string | null;
+  rarity: number | null;
+};
+
+type Achievement = {
+  achievement_id: string;
+  achievement_name: string | null;
+  achievement_description: string | null;
+  gamerscore: number | null;
+  achievement_icon_url: string | null;
+  rarity_percentage: number | null;
+  earned: boolean;
+  earned_at: string | null;
 };
 
 type ApiPayload = {
@@ -114,9 +136,37 @@ function actionBtn(active: boolean) {
   } as const;
 }
 
+// Simple per-release cache (memory)
+const psnTrophyCache = new Map<string, { fetchedAt: string; trophies: Trophy[] }>();
+
+function cacheKey(releaseId: string) {
+  return `psn_trophies:${releaseId}`;
+}
+
+function sortTrophiesEarnedFirst(items: Trophy[]): Trophy[] {
+  return [...items].sort((a, b) => {
+    const ae = a.earned ? 1 : 0;
+    const be = b.earned ? 1 : 0;
+
+    // earned first
+    if (ae !== be) return be - ae;
+
+    // within earned: most recently earned first
+    if (a.earned && b.earned) {
+      const at = a.earnedAt ? new Date(a.earnedAt).getTime() : 0;
+      const bt = b.earnedAt ? new Date(b.earnedAt).getTime() : 0;
+      if (at !== bt) return bt - at;
+    }
+
+    // within not-earned: stable order (by trophyId asc)
+    return (a.trophyId ?? 0) - (b.trophyId ?? 0);
+  });
+}
+
 export default function ReleaseDetailPage() {
   const params = useParams<{ id: string }>();
   const releaseId = params?.id;
+  
 
   const [release, setRelease] = useState<ReleaseDetail | null>(null);
   const [signals, setSignals] = useState<Signals | null>(null);
@@ -126,15 +176,8 @@ export default function ReleaseDetailPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // Trophy state
-  const [trophies, setTrophies] = useState<any[]>([]);
-  const [loadingTrophies, setLoadingTrophies] = useState(false);
-  const [trophyMsg, setTrophyMsg] = useState("");
-
+  // Trophy dropdown state
   const [trophyOpen, setTrophyOpen] = useState(false);
-  const [trophyLoading, setTrophyLoading] = useState(false);
-  const [trophyErr, setTrophyErr] = useState("");
-  const [trophyData, setTrophyData] = useState<any | null>(null);
 
   const [achievementOpen, setAchievementOpen] = useState(false);
   const [achievementLoading, setAchievementLoading] = useState(false);
@@ -145,6 +188,18 @@ export default function ReleaseDetailPage() {
   const [myLists, setMyLists] = useState<any[]>([]);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
+
+  // Trophy state (PSN) - for main column display
+  const [psnTrophies, setPsnTrophies] = useState<Trophy[] | null>(null);
+  const [psnTrophyErr, setPsnTrophyErr] = useState<string>("");
+  const [psnTrophyLoading, setPsnTrophyLoading] = useState(false);
+  const [psnTrophyNote, setPsnTrophyNote] = useState<string>("");
+
+  // Achievement state (Xbox) - for main column display
+  const [xboxAchievements, setXboxAchievements] = useState<Achievement[] | null>(null);
+  const [xboxAchievementErr, setXboxAchievementErr] = useState<string>("");
+  const [xboxAchievementLoading, setXboxAchievementLoading] = useState(false);
+  const [xboxAchievementNote, setXboxAchievementNote] = useState<string>("");
 
   const title = useMemo(() => {
     return release?.display_title ?? release?.games?.canonical_title ?? "Untitled";
@@ -173,9 +228,8 @@ export default function ReleaseDetailPage() {
 
   const platformLine = useMemo(() => {
     const label = (release as any)?.platform_label ?? null;
-    const name = release?.platform_name ?? "—";
-    if (label && String(label).trim() && String(label).trim() !== name) return `${name} • ${label}`;
-    return name;
+    const name = release?.platform_name ?? null;
+    return (label || name) ?? "—";
   }, [release]);
 
   async function load() {
@@ -185,18 +239,23 @@ export default function ReleaseDetailPage() {
       setLoading(true);
       setErr("");
 
+      console.log(`[ReleaseDetailPage] Loading release ${releaseId}`);
       const res = await fetch(`/api/releases/${releaseId}`, { cache: "no-store" });
       const text = await res.text();
       const data: ApiPayload | null = text ? JSON.parse(text) : null;
 
+      console.log(`[ReleaseDetailPage] API response:`, { status: res.status, ok: res.ok, hasRelease: !!data?.release, platformKey: data?.release?.platform_key });
+
       if (!res.ok) throw new Error((data as any)?.error || `Failed (${res.status})`);
 
       const r: ReleaseDetail | null = data?.release ?? null;
+      console.log(`[ReleaseDetailPage] Setting release:`, { id: r?.id, platform_key: r?.platform_key });
       setRelease(r);
       setSignals((data?.signals ?? null) as Signals | null);
       setPortfolio((data?.portfolio ?? null) as Portfolio);
       setPsnGroups(Array.isArray((data as any)?.psnGroups) ? (data as any).psnGroups : []);
     } catch (e: any) {
+      console.error(`[ReleaseDetailPage] Error loading release:`, e);
       setErr(e?.message || "Failed to load release");
       setRelease(null);
       setPortfolio(null);
@@ -207,26 +266,6 @@ export default function ReleaseDetailPage() {
     }
   }
 
-  async function loadTrophies() {
-    if (!releaseId) return;
-
-    try {
-      setTrophyErr("");
-      setTrophyLoading(true);
-
-      const res = await fetch(`/api/releases/${releaseId}/trophies`, { cache: "no-store" });
-      const text = await res.text();
-      const data = text ? JSON.parse(text) : null;
-
-      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
-      setTrophyData(data);
-    } catch (e: any) {
-      setTrophyErr(e?.message || "Failed to load trophies");
-      setTrophyData(null);
-    } finally {
-      setTrophyLoading(false);
-    }
-  }
 
   async function loadAchievements() {
     if (!releaseId) return;
@@ -249,9 +288,177 @@ export default function ReleaseDetailPage() {
     }
   }
 
+  async function loadPsnTrophies() {
+    if (!releaseId) return;
+
+    try {
+      setPsnTrophyLoading(true);
+      setPsnTrophyErr("");
+      setPsnTrophyNote("");
+
+      const res = await fetch(`/api/psn/trophies?release_id=${encodeURIComponent(releaseId)}`, {
+        cache: "no-store",
+      });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+
+      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+
+      const fetchedAt = new Date().toISOString();
+      const trophies: Trophy[] = Array.isArray(data?.trophies) ? data.trophies : [];
+
+      // sort before caching + rendering
+      const sorted = sortTrophiesEarnedFirst(trophies);
+
+      setPsnTrophyNote(data?.note || `Fresh • fetched ${new Date(fetchedAt).toLocaleString()}`);
+      setPsnTrophies(sorted);
+
+      // write caches
+      psnTrophyCache.set(String(releaseId), { fetchedAt, trophies: sorted });
+      try {
+        localStorage.setItem(cacheKey(String(releaseId)), JSON.stringify({ fetchedAt, trophies: sorted }));
+      } catch {
+        // ignore quota issues
+      }
+    } catch (e: any) {
+      setPsnTrophyErr(e?.message || "Failed to load trophies");
+      setPsnTrophies(null);
+    } finally {
+      setPsnTrophyLoading(false);
+    }
+  }
+
+  async function loadXboxAchievements() {
+    if (!releaseId) return;
+
+    try {
+      setXboxAchievementLoading(true);
+      setXboxAchievementErr("");
+      setXboxAchievementNote("");
+
+      const res = await fetch(`/api/releases/${releaseId}/achievements`, {
+        cache: "no-store",
+      });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+
+      if (!res.ok) {
+        const errorMsg = data?.error || `Failed (${res.status})`;
+        // Provide user-friendly error messages
+        if (res.status === 401 || errorMsg.includes("authenticate") || errorMsg.includes("access token")) {
+          throw new Error("Xbox authentication failed. Please reconnect your Xbox account in settings.");
+        }
+        throw new Error(errorMsg);
+      }
+
+      setXboxAchievementNote(data?.warning || data?.note || "");
+      const achievements = Array.isArray(data?.achievements) ? data.achievements : [];
+      setXboxAchievements(achievements);
+    } catch (e: any) {
+      console.error(`[loadXboxAchievements] Error:`, e);
+      setXboxAchievementErr(e?.message || "Failed to load achievements");
+      setXboxAchievements(null);
+    } finally {
+      setXboxAchievementLoading(false);
+    }
+  }
+
   useEffect(() => {
+    if (!releaseId) return;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setErr("");
+
+        console.log(`[ReleaseDetailPage] Loading release ${releaseId}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+        const res = await fetch(`/api/releases/${releaseId}`, { 
+          cache: "no-store",
+          signal: controller.signal 
+        });
+        clearTimeout(timeoutId);
+        
+        const text = await res.text();
+        const data: ApiPayload | null = text ? JSON.parse(text) : null;
+
+        console.log(`[ReleaseDetailPage] API response:`, { 
+          status: res.status, 
+          ok: res.ok, 
+          hasRelease: !!data?.release,
+          platformKey: data?.release?.platform_key,
+          error: (data as any)?.error 
+        });
+
+        if (!res.ok) throw new Error((data as any)?.error || `Failed (${res.status})`);
+
+        const r: ReleaseDetail | null = data?.release ?? null;
+        console.log(`[ReleaseDetailPage] Setting release:`, { id: r?.id, platform_key: r?.platform_key });
+        setRelease(r);
+        setSignals((data?.signals ?? null) as Signals | null);
+        setPortfolio((data?.portfolio ?? null) as Portfolio);
+        setPsnGroups(Array.isArray((data as any)?.psnGroups) ? (data as any).psnGroups : []);
+      } catch (e: any) {
+        console.error(`[ReleaseDetailPage] Error loading release:`, e);
+        setErr(e?.message || "Failed to load release");
+        setRelease(null);
+        setPortfolio(null);
+        setSignals(null);
+        setPsnGroups([]);
+      } finally {
+        console.log(`[ReleaseDetailPage] Setting loading to false`);
+        setLoading(false);
+      }
+    }
+
     load();
+  }, [releaseId]);
+
+  useEffect(() => {
+    // auto-load trophies/achievements once per release page view
+    if (!releaseId) return;
+    if (!release) return;
+
+    const key = String(release.platform_key || "").toLowerCase();
+    
+    // Auto-load PSN trophies for PSN releases
+    if (key === "psn") {
+      loadPsnTrophies();
+    }
+    
+    // Auto-load Xbox achievements for Xbox releases (xbox, x360, xone, xsx)
+    if (key === "xbox" || key === "x360" || key === "xone" || key === "xsx") {
+      loadXboxAchievements();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [releaseId, release]);
+
+  useEffect(() => {
+    if (!releaseId) return;
+
+    // 1) memory cache
+    const mem = psnTrophyCache.get(String(releaseId));
+    if (mem?.trophies?.length) {
+      setPsnTrophies(mem.trophies);
+      setPsnTrophyNote(`Cached • fetched ${new Date(mem.fetchedAt).toLocaleString()}`);
+      return;
+    }
+
+    // 2) localStorage cache (optional)
+    try {
+      const raw = localStorage.getItem(cacheKey(String(releaseId)));
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed?.trophies)) {
+        setPsnTrophies(parsed.trophies);
+        setPsnTrophyNote(`Cached • fetched ${new Date(parsed.fetchedAt).toLocaleString()}`);
+        psnTrophyCache.set(String(releaseId), { fetchedAt: parsed.fetchedAt, trophies: parsed.trophies });
+      }
+    } catch {
+      // ignore
+    }
   }, [releaseId]);
 
   useEffect(() => {
@@ -319,6 +526,11 @@ export default function ReleaseDetailPage() {
 
   // Compute playtime correctly - Steam only for Steam releases
   const isSteamRelease = (release?.platform_key || "").toLowerCase() === "steam";
+  
+  // Check if this is an Xbox release (xbox, x360, xone, xsx)
+  const platformKey = String(release?.platform_key || "").toLowerCase();
+  const isXboxRelease = platformKey === "xbox" || platformKey === "x360" || platformKey === "xone" || platformKey === "xsx";
+  
   const steamMinutes = isSteamRelease ? Number((portfolio as any)?.playtime_minutes ?? 0) : 0;
   const psnMinutes = Number((signals as any)?.psn?.playtime_minutes ?? 0);
   const psnProgress = (signals as any)?.psn?.trophy_progress ?? null;
@@ -352,7 +564,21 @@ export default function ReleaseDetailPage() {
       </div>
 
       {loading && <div style={{ color: "#6b7280" }}>Loading…</div>}
-      {err && <div style={{ color: "#b91c1c" }}>{err}</div>}
+      {err && (
+        <div style={{ 
+          background: "#fee2e2", 
+          border: "2px solid #ef4444", 
+          padding: 20, 
+          borderRadius: 8,
+          marginBottom: 20 
+        }}>
+          <div style={{ fontWeight: 900, marginBottom: 10, color: "#991b1b" }}>Error Loading Release</div>
+          <div style={{ color: "#991b1b" }}>{err}</div>
+          <div style={{ fontSize: 12, color: "#991b1b", marginTop: 8 }}>
+            Release ID: {releaseId || "none"}
+          </div>
+        </div>
+      )}
 
       {!loading && release && (
         <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 16 }}>
@@ -590,8 +816,8 @@ export default function ReleaseDetailPage() {
                     onClick={async () => {
                       const next = !trophyOpen;
                       setTrophyOpen(next);
-                      if (next && !trophyData && !trophyLoading) {
-                        await loadTrophies();
+                      if (next && !psnTrophies && !psnTrophyLoading) {
+                        await loadPsnTrophies();
                       }
                     }}
                     style={{
@@ -617,18 +843,21 @@ export default function ReleaseDetailPage() {
                       overflow: "hidden",
                     }}
                   >
-                    {trophyLoading && <div style={{ padding: 12, color: "#64748b" }}>Loading trophies…</div>}
-                    {trophyErr && <div style={{ padding: 12, color: "#b91c1c" }}>{trophyErr}</div>}
+                    {psnTrophyLoading && (
+                      <div style={{ padding: 12, color: "#64748b" }}>
+                        Loading trophies…
+                      </div>
+                    )}
 
-                    {!trophyLoading && !trophyErr && trophyData && (
+                    {psnTrophyErr && (
+                      <div style={{ padding: 12, color: "#b91c1c" }}>
+                        {psnTrophyErr}
+                      </div>
+                    )}
+
+                    {!psnTrophyLoading && !psnTrophyErr && psnTrophies && (
                       <div style={{ padding: 12 }}>
-                        <div style={{ color: "#64748b", fontSize: 13, marginBottom: 10 }}>
-                          {trophyData.cached ? "Cached" : "Fresh"} • fetched{" "}
-                          {trophyData.fetched_at ? new Date(trophyData.fetched_at).toLocaleString() : ""}
-                        </div>
-
-                        {/* Merge earned -> show earned state next to each trophy */}
-                        <TrophyList trophies={trophyData.trophies} earned={trophyData.earned} />
+                        <TrophyList trophies={psnTrophies} />
                       </div>
                     )}
                   </div>
@@ -904,6 +1133,277 @@ export default function ReleaseDetailPage() {
               </div>
             </div>
 
+            {/* Trophies (PSN) */}
+            <div
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 16,
+                background: "white",
+                padding: 16,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ fontWeight: 900, marginBottom: 6 }}>Trophies (PlayStation)</div>
+
+                <button
+                  type="button"
+                  onClick={loadPsnTrophies}
+                  disabled={psnTrophyLoading}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #e5e7eb",
+                    background: "white",
+                    fontWeight: 900,
+                    cursor: "pointer",
+                  }}
+                >
+                  {psnTrophyLoading ? "Loading…" : psnTrophies ? "Refresh" : "Load trophies"}
+                </button>
+              </div>
+
+              {psnTrophyErr ? (
+                <div style={{ color: "#b91c1c", marginTop: 6 }}>{psnTrophyErr}</div>
+              ) : null}
+
+              {psnTrophyNote ? (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>{psnTrophyNote}</div>
+              ) : null}
+
+              {psnTrophies && psnTrophies.length === 0 ? (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+                  No trophies found for this release yet.
+                </div>
+              ) : null}
+
+              {psnTrophies && psnTrophies.length > 0 ? (
+                <>
+                  {/* Summary row */}
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                    Earned <b>{psnTrophies.filter((t) => t.earned).length}</b> / {psnTrophies.length}
+                  </div>
+
+                  {/* Trophy grid */}
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                      gap: 10,
+                      marginTop: 10,
+                    }}
+                  >
+                    {psnTrophies.map((t) => (
+                      <div
+                        key={t.trophyId}
+                        style={{
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 12,
+                          padding: 10,
+                          background: t.earned ? "#f8fafc" : "white",
+                          display: "flex",
+                          gap: 10,
+                          alignItems: "flex-start",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 44,
+                            height: 44,
+                            borderRadius: 10,
+                            border: "1px solid #e5e7eb",
+                            background: "#f8fafc",
+                            overflow: "hidden",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {t.iconUrl ? (
+                            <img
+                              src={t.iconUrl}
+                              alt={t.name ?? "Trophy"}
+                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                            />
+                          ) : null}
+                        </div>
+
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <div style={{ fontWeight: 900, lineHeight: 1.2 }}>
+                              {t.name ?? "—"}
+                            </div>
+                            <div style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>
+                              {t.earned ? " • ✅" : ""}
+                            </div>
+                          </div>
+
+                          <div style={{ color: "#334155", fontSize: 13, marginTop: 4, lineHeight: 1.35 }}>
+                            {t.description ?? "—"}
+                          </div>
+
+                          {t.earned && t.earnedAt ? (
+                            <div style={{ color: "#64748b", fontSize: 12, marginTop: 6 }}>
+                              Earned: {new Date(t.earnedAt).toLocaleString()}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+            </div>
+
+            {/* Achievements (Xbox) - only show for Xbox releases */}
+            {isXboxRelease && (
+            <div
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 16,
+                background: "white",
+                padding: 16,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ fontWeight: 900, marginBottom: 6 }}>Achievements (Xbox)</div>
+
+                <button
+                  type="button"
+                  onClick={loadXboxAchievements}
+                  disabled={xboxAchievementLoading}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 12,
+                    border: "1px solid #e5e7eb",
+                    background: "white",
+                    fontWeight: 900,
+                    cursor: "pointer",
+                  }}
+                >
+                  {xboxAchievementLoading ? "Loading…" : xboxAchievements ? "Refresh" : "Load achievements"}
+                </button>
+              </div>
+
+              {xboxAchievementErr ? (
+                <div style={{ 
+                  color: "#b91c1c", 
+                  marginTop: 6, 
+                  padding: 12, 
+                  background: "#fee2e2", 
+                  borderRadius: 8,
+                  border: "1px solid #fca5a5"
+                }}>
+                  <div style={{ fontWeight: 900, marginBottom: 4 }}>Error loading achievements</div>
+                  <div>{xboxAchievementErr}</div>
+                  {xboxAchievementErr.includes("authentication") || xboxAchievementErr.includes("reconnect") ? (
+                    <div style={{ marginTop: 8, fontSize: 13 }}>
+                      <Link href="/xbox-connect" style={{ color: "#2563eb", textDecoration: "underline" }}>
+                        Reconnect Xbox account →
+                      </Link>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {xboxAchievementNote ? (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>{xboxAchievementNote}</div>
+              ) : null}
+
+              {/* Always show status message */}
+              {xboxAchievementLoading ? (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>Loading achievements...</div>
+              ) : xboxAchievementErr ? null : xboxAchievements === null ? (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+                  Click "Load achievements" to fetch achievements.
+                </div>
+              ) : xboxAchievements.length === 0 ? (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+                  No achievements found for this release yet.
+                </div>
+              ) : null}
+
+              {xboxAchievements && xboxAchievements.length > 0 ? (
+                <>
+                  {/* Summary row */}
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                    Earned <b>{xboxAchievements.filter((a) => a.earned).length}</b> / {xboxAchievements.length}
+                  </div>
+
+                  {/* Achievement grid */}
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                      gap: 10,
+                      marginTop: 10,
+                    }}
+                  >
+                    {xboxAchievements.map((a) => (
+                      <div
+                        key={a.achievement_id}
+                        style={{
+                          border: "1px solid #e5e7eb",
+                          borderRadius: 12,
+                          padding: 10,
+                          background: a.earned ? "#f8fafc" : "white",
+                          display: "flex",
+                          gap: 10,
+                          alignItems: "flex-start",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 44,
+                            height: 44,
+                            borderRadius: 10,
+                            border: "1px solid #e5e7eb",
+                            background: "#f8fafc",
+                            overflow: "hidden",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {a.achievement_icon_url ? (
+                            <img
+                              src={a.achievement_icon_url}
+                              alt={a.achievement_name ?? "Achievement"}
+                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                            />
+                          ) : null}
+                        </div>
+
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <div style={{ fontWeight: 900, lineHeight: 1.2 }}>
+                              {a.achievement_name ?? "—"}
+                            </div>
+                            <div style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>
+                              {a.gamerscore ? `${a.gamerscore}G` : ""}
+                              {a.earned ? " • ✅" : ""}
+                            </div>
+                          </div>
+
+                          <div style={{ color: "#334155", fontSize: 13, marginTop: 4, lineHeight: 1.35 }}>
+                            {a.achievement_description ?? "—"}
+                          </div>
+
+                          {a.rarity_percentage != null ? (
+                            <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>
+                              {a.rarity_percentage.toFixed(1)}% of players have this
+                            </div>
+                          ) : null}
+
+                          {a.earned_at ? (
+                            <div style={{ color: "#64748b", fontSize: 12, marginTop: 6 }}>
+                              Earned: {new Date(a.earned_at).toLocaleString()}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+            </div>
+            )}
+
             {/* TODO slots (we’ll wire these next): Tags, Media, Related games, etc */}
             {/* Trophy groups (only shown if game has DLC with separate trophy lists) */}
             {psnGroups.length > 0 && (
@@ -951,78 +1451,46 @@ export default function ReleaseDetailPage() {
   );
 }
 
-function TrophyList({ trophies, earned }: { trophies: any[]; earned: any[] }) {
-  const earnedSet = new Set(
-    (earned || [])
-      .map((t: any) => `${t?.trophyId ?? ""}:${t?.trophyGroupId ?? "default"}`)
-      .filter(Boolean)
-  );
-
+function TrophyList({ trophies }: { trophies: Trophy[] }) {
   const items = Array.isArray(trophies) ? trophies : [];
   if (!items.length) return <div style={{ color: "#64748b" }}>No trophies returned.</div>;
 
   return (
     <div style={{ display: "grid", gap: 10 }}>
-      {items.map((t: any) => {
-        const key = `${t?.trophyId ?? ""}:${t?.trophyGroupId ?? "default"}`;
-        const isEarned = earnedSet.has(key);
+      {items.map((t) => (
+        <div
+          key={t.trophyId}
+          style={{
+            opacity: t.earned ? 1 : 0.4,
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+          }}
+        >
+          {t.iconUrl && (
+            <img src={t.iconUrl} width={40} height={40} />
+          )}
 
-        const name = t?.trophyName ?? "Untitled trophy";
-        const detail = t?.trophyDetail ?? "";
-        const type = String(t?.trophyType ?? "").toLowerCase(); // bronze/silver/gold/platinum
-        const icon = t?.trophyIconUrl ?? null;
-
-        const badge =
-          type === "platinum" ? "💎" : type === "gold" ? "🥇" : type === "silver" ? "🥈" : "🥉";
-
-        return (
-          <div
-            key={key}
-            style={{
-              display: "flex",
-              gap: 12,
-              alignItems: "flex-start",
-              padding: 10,
-              borderRadius: 14,
-              border: "1px solid #e5e7eb",
-              background: isEarned ? "#f0fdf4" : "#fff",
-            }}
-          >
-            <div
-              style={{
-                width: 44,
-                height: 44,
-                borderRadius: 12,
-                overflow: "hidden",
-                border: "1px solid #e5e7eb",
-                background: "#f8fafc",
-                flexShrink: 0,
-              }}
-            >
-              {icon ? (
-                <img src={icon} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              ) : null}
+          <div>
+            <div style={{ fontWeight: 700 }}>
+              {t.name}
+            </div>
+            <div style={{ fontSize: 13, color: "#64748b" }}>
+              {t.description}
             </div>
 
-            <div style={{ flex: 1 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                <div style={{ fontWeight: 900, lineHeight: 1.2 }}>
-                  {badge} {name}
-                </div>
-                <div style={{ fontSize: 12, fontWeight: 900, color: isEarned ? "#166534" : "#64748b" }}>
-                  {isEarned ? "Earned" : "Not earned"}
-                </div>
+            {t.earned ? (
+              <div style={{ fontSize: 12, color: "#16a34a" }}>
+                Earned {t.earnedAt ? `• ${new Date(t.earnedAt).toLocaleDateString()}` : ""}
               </div>
-
-              {detail ? (
-                <div style={{ marginTop: 4, color: "#334155", lineHeight: 1.4, fontSize: 13 }}>
-                  {detail}
-                </div>
-              ) : null}
-            </div>
+            ) : (
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                Not earned
+              </div>
+            )}
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }

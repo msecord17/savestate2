@@ -268,17 +268,13 @@ export async function GET(req: Request) {
       const psn = psnByRelease[rid] ?? null;
       const xb = xboxByRelease[rid] ?? null;
 
-      // IMPORTANT:
-      // portfolio_entries.playtime_minutes should ONLY be treated as Steam playtime
-      // when the release itself is a Steam release.
-           // IMPORTANT:
-      // portfolio_entries.playtime_minutes is ONLY reliable as Steam playtime
-      // when the release itself is Steam.
+      // portfolio_entries.playtime_minutes should ONLY count as Steam playtime
+      // when this release is actually a Steam release.
       const isSteamRelease = String(rel.platform_key ?? "").toLowerCase() === "steam";
-      const steamMinutes = isSteamRelease ? Number(r?.playtime_minutes ?? 0) : 0;
+      const steamMinutes = isSteamRelease ? Number(r?.playtime_minutes || 0) : 0;
 
       const sources: string[] = [];
-      if (steamMinutes > 0) sources.push("Steam");
+      if (isSteamRelease && steamMinutes > 0) sources.push("Steam");
       if (psn) sources.push("PSN");
       if (xb) sources.push("Xbox");
 

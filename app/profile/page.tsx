@@ -280,6 +280,29 @@ export default function ProfilePage() {
             )}
           </div>
 
+          {/* Era Quiz */}
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Era History</div>
+            <Link
+              href="/era-onboarding"
+              style={{
+                display: "inline-block",
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                background: "white",
+                fontWeight: 900,
+                textDecoration: "none",
+                color: "#0f172a",
+              }}
+            >
+              Take Era Quiz →
+            </Link>
+            <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+              90 seconds. Improves your Gamer Lifetime Score.
+            </div>
+          </div>
+
           {/* Steam */}
           <div style={{ marginTop: 16 }}>
             <div style={{ fontWeight: 900, marginBottom: 6 }}>Steam</div>
