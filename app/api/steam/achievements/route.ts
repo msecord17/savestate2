@@ -56,9 +56,11 @@ export async function GET(req: Request) {
   if (extErr) return NextResponse.json({ error: extErr.message }, { status: 500 });
 
   const appidFromExternalIds = String(ext?.external_id ?? "").trim();
+  let appid: string;
+  
   if (appidFromExternalIds) {
     logSteamResolution(releaseId, "release_external_ids", appidFromExternalIds);
-    var appid = appidFromExternalIds;
+    appid = appidFromExternalIds;
   } else {
     // Fallback 1: if no mapping in release_external_ids, check steam_title_progress
     const { data: progress } = await supabase
@@ -71,7 +73,7 @@ export async function GET(req: Request) {
     const appidFromProgress = progress?.steam_appid ? String(progress.steam_appid) : "";
     if (appidFromProgress) {
       logSteamResolution(releaseId, "steam_title_progress", appidFromProgress);
-      var appid = appidFromProgress;
+      appid = appidFromProgress;
     } else {
       // Fallback 2: check the release itself for steam_appid field (if releases table has it)
       const { data: release } = await supabase
@@ -83,7 +85,7 @@ export async function GET(req: Request) {
       const appidFromRelease = release?.steam_appid ? String(release.steam_appid) : "";
       if (appidFromRelease) {
         logSteamResolution(releaseId, "releases", appidFromRelease);
-        var appid = appidFromRelease;
+        appid = appidFromRelease;
       } else {
         logSteamResolution(releaseId, "none");
         return NextResponse.json({

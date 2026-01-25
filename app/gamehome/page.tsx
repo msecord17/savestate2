@@ -129,7 +129,7 @@ export default function GameHomePage() {
 
     for (const c of cards as any[]) {
       if (Array.isArray(c.platforms)) {
-        c.platforms.forEach((p) => set.add(p));
+        c.platforms.forEach((p: string) => set.add(p));
       } else {
         // release mode cards
         const label = c.platform_label || c.platform_name || c.platform_key;
