@@ -259,6 +259,22 @@ export async function GET(req: Request) {
     }
   }
 
+  // 3B) Steam progress (by release_id)
+  const steamByRelease: Record<string, any> = {};
+  if (releaseIds.length) {
+    const { data: stRows, error: sErr } = await supabase
+      .from("steam_title_progress")
+      .select("release_id, steam_appid, playtime_minutes, last_updated_at")
+      .eq("user_id", user.id)
+      .in("release_id", releaseIds);
+
+    if (!sErr && Array.isArray(stRows)) {
+      for (const s of stRows as any[]) {
+        if (s?.release_id) steamByRelease[String(s.release_id)] = s;
+      }
+    }
+  }
+
   const releaseCards = rows
     .map((r: any) => {
       const rel = r?.releases;
@@ -267,25 +283,29 @@ export async function GET(req: Request) {
       const rid = String(rel.id);
       const psn = psnByRelease[rid] ?? null;
       const xb = xboxByRelease[rid] ?? null;
+      const steam = steamByRelease[rid] ?? null;
 
-      // portfolio_entries.playtime_minutes should ONLY count as Steam playtime
-      // when this release is actually a Steam release.
-      const isSteamRelease = String(rel.platform_key ?? "").toLowerCase() === "steam";
-      const steamMinutes = isSteamRelease ? Number(r?.playtime_minutes || 0) : 0;
+      // Only count Steam playtime for Steam releases
+      const steamMinutes =
+        String(rel.platform_key ?? "").toLowerCase() === "steam"
+          ? Number(steam?.playtime_minutes ?? 0)
+          : 0;
 
       const sources: string[] = [];
-      if (isSteamRelease && steamMinutes > 0) sources.push("Steam");
+      if (steamMinutes > 0) sources.push("Steam");
       if (psn) sources.push("PSN");
       if (xb) sources.push("Xbox");
 
       const psnUpdated = toIsoOrNull(psn?.last_updated_at);
       const xbUpdated = toIsoOrNull(xb?.last_updated_at);
+      const steamUpdated = toIsoOrNull(steam?.last_updated_at);
       const entryUpdated = toIsoOrNull(r?.updated_at);
 
       let lastSignalAt: string | null = null;
       // Use the most recent signal across all sources (including portfolio entry stamp)
       lastSignalAt = maxIso(lastSignalAt, psnUpdated);
       lastSignalAt = maxIso(lastSignalAt, xbUpdated);
+      lastSignalAt = maxIso(lastSignalAt, steamUpdated);
       if (steamMinutes > 0) lastSignalAt = maxIso(lastSignalAt, entryUpdated);
 
       return {

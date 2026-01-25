@@ -70,6 +70,14 @@ function pillStyle(bg: string) {
   };
 }
 
+function normalizeSourceKey(s: string) {
+  const x = String(s || "").toLowerCase();
+  if (x === "steam") return "steam";
+  if (x === "psn" || x === "playstation") return "psn";
+  if (x === "xbox") return "xbox";
+  return x;
+}
+
 function cardPlatformLabel(c: any) {
   return (
     (c.platform_label && String(c.platform_label)) ||
@@ -119,18 +127,18 @@ export default function GameHomePage() {
   const platforms = useMemo(() => {
     const set = new Set<string>();
 
-    for (const c of cards) {
-      if (splitByPlatform) {
-        set.add(cardPlatformLabel(c));
+    for (const c of cards as any[]) {
+      if (Array.isArray(c.platforms)) {
+        c.platforms.forEach((p) => set.add(p));
       } else {
-        if (Array.isArray((c as any).platforms)) {
-          (c as any).platforms.forEach((p: string) => set.add(p));
-        }
+        // release mode cards
+        const label = c.platform_label || c.platform_name || c.platform_key;
+        if (label) set.add(String(label));
       }
     }
 
     return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
-  }, [cards, splitByPlatform]);
+  }, [cards]);
 
   const statuses = useMemo(() => {
     const set = new Set<string>();
@@ -145,16 +153,25 @@ export default function GameHomePage() {
     let out = cards.slice();
 
     if (platform !== "all") {
-      out = out.filter((c: any) => {
-        if (splitByPlatform) {
-          return cardPlatformLabel(c) === platform;
-        }
-        return Array.isArray(c.platforms) ? c.platforms.includes(platform) : false;
-      });
+      if (splitByPlatform) {
+        out = out.filter((c: any) => {
+          const label = c.platform_label || c.platform_name || c.platform_key || "";
+          return String(label) === platform;
+        });
+      } else {
+        out = out.filter((c) => Array.isArray(c.platforms) && c.platforms.includes(platform));
+      }
     }
 
     if (source !== "all") {
-      out = out.filter((c) => c.sources?.includes(source));
+      // In release-mode (splitByPlatform), "Source" should mean the release's platform_key.
+      // In game-mode, keep current behavior: "this game has signals from X".
+      if (splitByPlatform) {
+        const want = normalizeSourceKey(source);
+        out = out.filter((c: any) => normalizeSourceKey(c.platform_key) === want);
+      } else {
+        out = out.filter((c) => Array.isArray(c.sources) && c.sources.includes(source));
+      }
     }
 
     if (status !== "all") {

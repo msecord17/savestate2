@@ -25,6 +25,11 @@ type ReleaseDetail = {
 };
 
 type Signals = {
+  steam: null | {
+    steam_appid: string | null;
+    playtime_minutes: number | null;
+    last_updated_at: string | null;
+  };
   psn: null | {
     title_name: string | null;
     title_platform: string | null;
@@ -201,6 +206,18 @@ export default function ReleaseDetailPage() {
   const [xboxAchievementLoading, setXboxAchievementLoading] = useState(false);
   const [xboxAchievementNote, setXboxAchievementNote] = useState<string>("");
 
+  // RetroAchievements (RA)
+  const [raAchievements, setRaAchievements] = useState<any[] | null>(null);
+  const [raErr, setRaErr] = useState("");
+  const [raLoading, setRaLoading] = useState(false);
+  const [raNote, setRaNote] = useState("");
+
+  // Achievement state (Steam) - for main column display
+  const [steamAchievements, setSteamAchievements] = useState<Achievement[] | null>(null);
+  const [steamAchievementErr, setSteamAchievementErr] = useState("");
+  const [steamAchievementLoading, setSteamAchievementLoading] = useState(false);
+  const [steamAchievementNote, setSteamAchievementNote] = useState("");
+
   const title = useMemo(() => {
     return release?.display_title ?? release?.games?.canonical_title ?? "Untitled";
   }, [release]);
@@ -328,6 +345,33 @@ export default function ReleaseDetailPage() {
     }
   }
 
+  async function loadRaAchievements(force = false) {
+    if (!releaseId) return;
+
+    try {
+      setRaLoading(true);
+      setRaErr("");
+      setRaNote("");
+
+      const res = await fetch(
+        `/api/ra/achievements?release_id=${encodeURIComponent(releaseId)}${force ? "&force=1" : ""}`,
+        { cache: "no-store" }
+      );
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+
+      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+
+      setRaNote(data?.note || "");
+      setRaAchievements(Array.isArray(data?.achievements) ? data.achievements : []);
+    } catch (e: any) {
+      setRaErr(e?.message || "Failed to load RetroAchievements");
+      setRaAchievements(null);
+    } finally {
+      setRaLoading(false);
+    }
+  }
+
   async function loadXboxAchievements() {
     if (!releaseId) return;
 
@@ -360,6 +404,30 @@ export default function ReleaseDetailPage() {
       setXboxAchievements(null);
     } finally {
       setXboxAchievementLoading(false);
+    }
+  }
+
+  async function loadSteamAchievements() {
+    if (!releaseId) return;
+    try {
+      setSteamAchievementLoading(true);
+      setSteamAchievementErr("");
+      setSteamAchievementNote("");
+
+      const res = await fetch(`/api/steam/achievements?release_id=${encodeURIComponent(releaseId)}`, { cache: "no-store" });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+
+      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+
+      const achievements = Array.isArray(data?.achievements) ? data.achievements : [];
+      setSteamAchievements(achievements);
+      setSteamAchievementNote(data?.note || "");
+    } catch (e: any) {
+      setSteamAchievementErr(e?.message || "Failed to load Steam achievements");
+      setSteamAchievements(null);
+    } finally {
+      setSteamAchievementLoading(false);
     }
   }
 
@@ -431,6 +499,11 @@ export default function ReleaseDetailPage() {
     // Auto-load Xbox achievements for Xbox releases (xbox, x360, xone, xsx)
     if (key === "xbox" || key === "x360" || key === "xone" || key === "xsx") {
       loadXboxAchievements();
+    }
+
+    // Auto-load Steam achievements for Steam releases
+    if (key === "steam") {
+      loadSteamAchievements();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releaseId, release]);
@@ -531,7 +604,10 @@ export default function ReleaseDetailPage() {
   const platformKey = String(release?.platform_key || "").toLowerCase();
   const isXboxRelease = platformKey === "xbox" || platformKey === "x360" || platformKey === "xone" || platformKey === "xsx";
   
-  const steamMinutes = isSteamRelease ? Number((portfolio as any)?.playtime_minutes ?? 0) : 0;
+  const steamMinutes =
+    isSteamRelease
+      ? Number((signals as any)?.steam?.playtime_minutes ?? (portfolio as any)?.playtime_minutes ?? 0)
+      : 0;
   const psnMinutes = Number((signals as any)?.psn?.playtime_minutes ?? 0);
   const psnProgress = (signals as any)?.psn?.trophy_progress ?? null;
 
@@ -1402,6 +1478,174 @@ export default function ReleaseDetailPage() {
                 </>
               ) : null}
             </div>
+            )}
+
+            {/* RetroAchievements (RA) */}
+            <div
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 16,
+                background: "white",
+                padding: 16,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ fontWeight: 900, marginBottom: 6 }}>Achievements (RetroAchievements)</div>
+
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => loadRaAchievements(false)}
+                    disabled={raLoading}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {raLoading ? "Loading…" : raAchievements ? "Refresh (cached)" : "Load"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => loadRaAchievements(true)}
+                    disabled={raLoading}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                    title="Forces a fresh pull from RA API"
+                  >
+                    Force refresh
+                  </button>
+                </div>
+              </div>
+
+              {raErr ? <div style={{ color: "#b91c1c", marginTop: 6 }}>{raErr}</div> : null}
+              {raNote ? <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>{raNote}</div> : null}
+
+              {raAchievements && raAchievements.length === 0 ? (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+                  No RetroAchievements found for this release yet.
+                </div>
+              ) : null}
+
+              {raAchievements && raAchievements.length > 0 ? (
+                <>
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                    Earned <b>{raAchievements.filter((a) => a.earned).length}</b> / {raAchievements.length}
+                  </div>
+
+                  {(() => {
+                    const raItems = Array.isArray(raAchievements) ? [...raAchievements] : [];
+                    raItems.sort((a, b) => {
+                      if (Boolean(a.earned) !== Boolean(b.earned)) return a.earned ? -1 : 1;
+                      const ta = a.earned_at ? new Date(a.earned_at).getTime() : 0;
+                      const tb = b.earned_at ? new Date(b.earned_at).getTime() : 0;
+                      return tb - ta;
+                    });
+
+                    return (
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                          gap: 10,
+                          marginTop: 10,
+                        }}
+                      >
+                        {raItems.map((a: any) => (
+                          <div
+                            key={a.achievement_id || a.id}
+                            style={{
+                              border: "1px solid #e5e7eb",
+                              borderRadius: 12,
+                              padding: 10,
+                              background: a.earned ? "#f8fafc" : "white",
+                              display: "flex",
+                              gap: 10,
+                              alignItems: "flex-start",
+                            }}
+                          >
+                            <div style={{ flex: 1 }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                                <div style={{ fontWeight: 900, lineHeight: 1.2 }}>
+                                  {a.achievement_name || a.title || "—"}
+                                </div>
+                                <div style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>
+                                  {a.gamerscore != null ? `${a.gamerscore} pts` : a.points != null ? `${a.points} pts` : ""}
+                                </div>
+                              </div>
+
+                              <div style={{ fontSize: 12, fontWeight: 900, color: a.earned ? "#166534" : "#64748b", marginTop: 4 }}>
+                                {a.earned ? "Earned ✅" : "Not earned"}
+                              </div>
+
+                              <div style={{ color: "#334155", fontSize: 13, marginTop: 4, lineHeight: 1.35 }}>
+                                {a.achievement_description || a.description || "—"}
+                              </div>
+
+                              {a.earned && a.earned_at ? (
+                                <div style={{ color: "#64748b", fontSize: 12, marginTop: 6 }}>
+                                  Earned: {new Date(a.earned_at).toLocaleString()}
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </>
+              ) : null}
+            </div>
+
+            {/* Achievements (Steam) - only show for Steam releases */}
+            {isSteamRelease && (
+              <div style={{ border: "1px solid #e5e7eb", borderRadius: 16, background: "white", padding: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                  <div style={{ fontWeight: 900, marginBottom: 6 }}>Achievements (Steam)</div>
+
+                  <button
+                    type="button"
+                    onClick={loadSteamAchievements}
+                    disabled={steamAchievementLoading}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {steamAchievementLoading ? "Loading…" : steamAchievements ? "Refresh" : "Load achievements"}
+                  </button>
+                </div>
+
+                {steamAchievementErr ? <div style={{ color: "#b91c1c", marginTop: 6 }}>{steamAchievementErr}</div> : null}
+                {steamAchievementNote ? <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>{steamAchievementNote}</div> : null}
+
+                {steamAchievements && steamAchievements.length > 0 ? (
+                  <>
+                    <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                      Earned <b>{steamAchievements.filter((a) => a.earned).length}</b> / {steamAchievements.length}
+                    </div>
+                    <div style={{ marginTop: 10 }}>
+                      <AchievementList achievements={steamAchievements} earned={[]} />
+                    </div>
+                  </>
+                ) : steamAchievements && steamAchievements.length === 0 ? (
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>No Steam achievements found for this release.</div>
+                ) : null}
+              </div>
             )}
 
             {/* TODO slots (we’ll wire these next): Tags, Media, Related games, etc */}

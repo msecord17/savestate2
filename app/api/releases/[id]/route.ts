@@ -94,6 +94,20 @@ export async function GET(
       console.warn("xbox progress read error:", xbErr.message);
     }
 
+    // 2.5) Steam progress for this release
+    const { data: steam, error: steamErr } = await supabase
+      .from("steam_title_progress")
+      .select("steam_appid, playtime_minutes, last_updated_at")
+      .eq("user_id", user.id)
+      .eq("release_id", id)
+      .order("last_updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (steamErr) {
+      console.warn("steam progress read error:", steamErr.message);
+    }
+
     // IMPORTANT: portfolio_entries.playtime_minutes should ONLY be treated as Steam playtime
     // when the release itself is a Steam release. Filter it out for non-Steam releases.
     const portfolioData = portfolio
@@ -111,6 +125,7 @@ export async function GET(
       release,
       portfolio: portfolioData,
       signals: {
+        steam: steam ?? null,
         psn: psn ?? null,
         xbox: xbox ?? null,
       },
