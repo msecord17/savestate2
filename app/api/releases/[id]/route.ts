@@ -31,6 +31,7 @@ export async function GET(
         platform_key,
         platform_label,
         cover_url,
+        steam_appid,
         created_at,
         updated_at,
         game_id,
@@ -94,18 +95,100 @@ export async function GET(
       console.warn("xbox progress read error:", xbErr.message);
     }
 
-    // 2.5) Steam progress for this release
-    const { data: steam, error: steamErr } = await supabase
+    // 2.5) Steam progress for this release (robust resolution like achievements)
+    let steam: any = null;
+
+    // Primary: by release_id
+    const { data: steamRow, error: steamErr } = await supabase
       .from("steam_title_progress")
-      .select("steam_appid, playtime_minutes, last_updated_at")
+      .select("steam_appid, playtime_minutes, last_updated_at, release_id")
       .eq("user_id", user.id)
       .eq("release_id", id)
       .order("last_updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
+    console.log("[releases/id] steam lookup", {
+      user_id: user.id,
+      release_id: id,
+      steam: steamRow,
+      steamErr: steamErr?.message ?? null,
+      steamErrCode: (steamErr as any)?.code ?? null,
+      steamErrDetails: (steamErr as any)?.details ?? null,
+      steamErrHint: (steamErr as any)?.hint ?? null,
+    });
+    
+    // Check for RLS/permission errors
     if (steamErr) {
-      console.warn("steam progress read error:", steamErr.message);
+      const errMsg = String(steamErr.message ?? "").toLowerCase();
+      if (errMsg.includes("permission") || errMsg.includes("policy") || errMsg.includes("rls") || (steamErr as any)?.code === "42501") {
+        console.error("[releases/id] ⚠️ RLS BLOCKING STEAM QUERY:", {
+          error: steamErr.message,
+          code: (steamErr as any)?.code,
+          hint: (steamErr as any)?.hint,
+        });
+      } else {
+        console.warn("steam progress read error:", steamErr.message);
+      }
+    }
+    
+    // Verify release_id is populated if we got data
+    if (steamRow && !steamRow.release_id) {
+      console.warn("[releases/id] ⚠️ steam_title_progress row missing release_id:", {
+        steam_appid: steamRow.steam_appid,
+        playtime_minutes: steamRow.playtime_minutes,
+      });
+    }
+
+    steam = steamRow ?? null;
+
+    // If missing, resolve appid and re-query by steam_appid
+    if (!steam) {
+      let appid = "";
+
+      // Fallback 1: release_external_ids mapping
+      const { data: ext } = await supabase
+        .from("release_external_ids")
+        .select("external_id")
+        .eq("release_id", id)
+        .eq("source", "steam")
+        .maybeSingle();
+
+      if (ext?.external_id) appid = String(ext.external_id).trim();
+
+      // Fallback 2: releases.steam_appid (if present)
+      if (!appid && (release as any)?.steam_appid) {
+        appid = String((release as any).steam_appid).trim();
+      }
+
+      // Fallback 3: if user has *any* steam progress rows for this release (rare edge), keep it
+      // (not needed if we already tried by release_id, but harmless as an extra safety net)
+
+      if (appid) {
+        const { data: steamByApp } = await supabase
+          .from("steam_title_progress")
+          .select("steam_appid, playtime_minutes, last_updated_at")
+          .eq("user_id", user.id)
+          .eq("steam_appid", appid)
+          .order("last_updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        steam = steamByApp ?? null;
+      }
+    }
+
+    // ✅ HARD FALLBACK: if no steam_title_progress row exists, synthesize Steam signal from portfolio for Steam releases
+    const isSteam = String((release as any)?.platform_key ?? "").toLowerCase() === "steam";
+    const portfolioMinutes = portfolio?.playtime_minutes != null ? Number(portfolio.playtime_minutes) : null;
+
+    if (isSteam && !steam && portfolioMinutes != null) {
+      steam = {
+        steam_appid: (release as any)?.steam_appid ?? null,
+        playtime_minutes: portfolioMinutes,
+        last_updated_at: portfolio?.updated_at ?? null,
+        note: "fallback_from_portfolio",
+      };
     }
 
     // IMPORTANT: portfolio_entries.playtime_minutes should ONLY be treated as Steam playtime

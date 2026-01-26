@@ -33,6 +33,34 @@ function logSteamResolution(
   });
 }
 
+async function ensureSteamMapping(
+  supabase: any,
+  releaseId: string,
+  appid: string
+) {
+  const clean = String(appid || "").trim();
+  if (!clean) return;
+
+  const { error } = await supabase
+    .from("release_external_ids")
+    .upsert(
+      {
+        release_id: releaseId,
+        source: "steam",
+        external_id: clean,
+      },
+      // IMPORTANT: your table likely has a unique constraint on (release_id, source)
+      // If yours is different, change this to match your constraint.
+      { onConflict: "release_id,source" }
+    );
+
+  if (error) {
+    console.warn("[SteamResolve] mapping upsert failed:", error.message);
+  } else {
+    console.info("[SteamResolve] mapping upserted", { releaseId, appid: clean });
+  }
+}
+
 export async function GET(req: Request) {
   const supabase = await supabaseRouteClient();
   const { data: userRes } = await supabase.auth.getUser();
@@ -74,6 +102,7 @@ export async function GET(req: Request) {
     if (appidFromProgress) {
       logSteamResolution(releaseId, "steam_title_progress", appidFromProgress);
       appid = appidFromProgress;
+      await ensureSteamMapping(supabase, releaseId, appidFromProgress);
     } else {
       // Fallback 2: check the release itself for steam_appid field (if releases table has it)
       const { data: release } = await supabase
@@ -86,6 +115,7 @@ export async function GET(req: Request) {
       if (appidFromRelease) {
         logSteamResolution(releaseId, "releases", appidFromRelease);
         appid = appidFromRelease;
+        await ensureSteamMapping(supabase, releaseId, appidFromRelease);
       } else {
         logSteamResolution(releaseId, "none");
         return NextResponse.json({
@@ -167,14 +197,50 @@ export async function GET(req: Request) {
     const aJson = await aRes.json();
     const sJson = await sRes.json();
 
+    // Check for privacy/access issues
+    if (aJson?.playerstats?.error || aJson?.playerstats?.result !== 1) {
+      const errorMsg = aJson?.playerstats?.error || "Unknown error";
+      if (errorMsg.includes("private") || errorMsg.includes("Private")) {
+        return NextResponse.json({
+          ok: true,
+          cached: false,
+          fetched_at: nowIso(),
+          note: "Steam profile private - game details must be public to view achievements",
+          achievements: [],
+        });
+      }
+    }
+
     // achieved list
     achieved = Array.isArray(aJson?.playerstats?.achievements) ? aJson.playerstats.achievements : [];
+
+    // Check if API returned no playerstats at all
+    if (!aJson?.playerstats) {
+      return NextResponse.json({
+        ok: true,
+        cached: false,
+        fetched_at: nowIso(),
+        note: "Steam API returned no playerstats data",
+        achievements: [],
+      });
+    }
 
     // schema list
     schemaAchievements =
       Array.isArray(sJson?.game?.availableGameStats?.achievements)
         ? sJson.game.availableGameStats.achievements
         : [];
+
+    // Check if game has no achievements
+    if (!schemaAchievements.length) {
+      return NextResponse.json({
+        ok: true,
+        cached: false,
+        fetched_at: nowIso(),
+        note: "This app has no achievements",
+        achievements: [],
+      });
+    }
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Steam achievements fetch failed" }, { status: 500 });
   }

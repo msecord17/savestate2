@@ -141,6 +141,33 @@ function actionBtn(active: boolean) {
   } as const;
 }
 
+function sortEarnedFirst<T extends { earned?: boolean; earned_at?: string | null; earnedAt?: string | null; name?: string | null; achievement_name?: string | null }>(
+  items: T[]
+) {
+  return [...items].sort((a, b) => {
+    const ea = Boolean(a.earned);
+    const eb = Boolean(b.earned);
+    if (ea !== eb) return ea ? -1 : 1;
+
+    const da = a.earned_at ?? a.earnedAt ?? null;
+    const db = b.earned_at ?? b.earnedAt ?? null;
+    const ta = da ? new Date(da).getTime() : 0;
+    const tb = db ? new Date(db).getTime() : 0;
+    if (ta !== tb) return tb - ta;
+
+    const na = (a.name ?? a.achievement_name ?? "").toLowerCase();
+    const nb = (b.name ?? b.achievement_name ?? "").toLowerCase();
+    return na.localeCompare(nb);
+  });
+}
+
+function computeEarnedSummary(items: Array<{ earned?: boolean }>) {
+  const total = items.length;
+  const earned = items.filter((x) => Boolean(x.earned)).length;
+  const percent = total > 0 ? Math.round((earned / total) * 100) : 0;
+  return { total, earned, percent };
+}
+
 // Simple per-release cache (memory)
 const psnTrophyCache = new Map<string, { fetchedAt: string; trophies: Trophy[] }>();
 
@@ -268,6 +295,8 @@ export default function ReleaseDetailPage() {
       const r: ReleaseDetail | null = data?.release ?? null;
       console.log(`[ReleaseDetailPage] Setting release:`, { id: r?.id, platform_key: r?.platform_key });
       setRelease(r);
+      console.log("release.platform_key", r?.platform_key, "release.id", r?.id);
+      console.log("signals.steam", (data as any)?.signals?.steam);
       setSignals((data?.signals ?? null) as Signals | null);
       setPortfolio((data?.portfolio ?? null) as Portfolio);
       setPsnGroups(Array.isArray((data as any)?.psnGroups) ? (data as any).psnGroups : []);
@@ -409,20 +438,30 @@ export default function ReleaseDetailPage() {
 
   async function loadSteamAchievements() {
     if (!releaseId) return;
+
     try {
       setSteamAchievementLoading(true);
       setSteamAchievementErr("");
       setSteamAchievementNote("");
 
-      const res = await fetch(`/api/steam/achievements?release_id=${encodeURIComponent(releaseId)}`, { cache: "no-store" });
+      const res = await fetch(
+        `/api/steam/achievements?release_id=${encodeURIComponent(releaseId)}`,
+        { cache: "no-store" }
+      );
+
       const text = await res.text();
       const data = text ? JSON.parse(text) : null;
 
-      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
+      if (!res.ok) {
+        const errorMsg = data?.error || `Failed (${res.status})`;
+        if (res.status === 400 && String(errorMsg).toLowerCase().includes("steam not connected")) {
+          throw new Error("Steam not connected. Add your Steam ID in profile/settings.");
+        }
+        throw new Error(errorMsg);
+      }
 
-      const achievements = Array.isArray(data?.achievements) ? data.achievements : [];
-      setSteamAchievements(achievements);
       setSteamAchievementNote(data?.note || "");
+      setSteamAchievements(Array.isArray(data?.achievements) ? data.achievements : []);
     } catch (e: any) {
       setSteamAchievementErr(e?.message || "Failed to load Steam achievements");
       setSteamAchievements(null);
@@ -465,6 +504,7 @@ export default function ReleaseDetailPage() {
         const r: ReleaseDetail | null = data?.release ?? null;
         console.log(`[ReleaseDetailPage] Setting release:`, { id: r?.id, platform_key: r?.platform_key });
         setRelease(r);
+        console.log("release.platform_key", r?.platform_key, "release.id", r?.id);
         setSignals((data?.signals ?? null) as Signals | null);
         setPortfolio((data?.portfolio ?? null) as Portfolio);
         setPsnGroups(Array.isArray((data as any)?.psnGroups) ? (data as any).psnGroups : []);
@@ -597,21 +637,32 @@ export default function ReleaseDetailPage() {
   // Backloggd-ish “quick actions”
   const currentStatus = String(portfolio?.status ?? "owned");
 
-  // Compute playtime correctly - Steam only for Steam releases
-  const isSteamRelease = (release?.platform_key || "").toLowerCase() === "steam";
+  const platformKey = String(release?.platform_key || "").toLowerCase();
+  const isSteamRelease = platformKey === "steam";
+
+  // Canonical Steam playtime
+  const steamMinutes = isSteamRelease ? Number((signals as any)?.steam?.playtime_minutes ?? 0) : 0;
+
+  useEffect(() => {
+    if (!release) return;
+    console.log("[ReleasePage steam debug]", {
+      releaseId,
+      platform_key: release.platform_key,
+      portfolio_playtime: (portfolio as any)?.playtime_minutes ?? null,
+      signal_playtime: (signals as any)?.steam?.playtime_minutes ?? null,
+      steamMinutes,
+      signals_steam: (signals as any)?.steam ?? null,
+    });
+  }, [releaseId, release, portfolio, signals, steamMinutes]);
   
   // Check if this is an Xbox release (xbox, x360, xone, xsx)
-  const platformKey = String(release?.platform_key || "").toLowerCase();
   const isXboxRelease = platformKey === "xbox" || platformKey === "x360" || platformKey === "xone" || platformKey === "xsx";
-  
-  const steamMinutes =
-    isSteamRelease
-      ? Number((signals as any)?.steam?.playtime_minutes ?? (portfolio as any)?.playtime_minutes ?? 0)
-      : 0;
   const psnMinutes = Number((signals as any)?.psn?.playtime_minutes ?? 0);
   const psnProgress = (signals as any)?.psn?.trophy_progress ?? null;
 
-  const hasSteam = steamMinutes > 0;
+  // Temporary fix: show Steam if signal exists, even if platform_key isn't "steam"
+  const hasSteamSignal = Boolean((signals as any)?.steam?.playtime_minutes != null);
+  const hasSteam = hasSteamSignal && steamMinutes > 0;
   const hasPsn = !!signals?.psn;
   const hasXbox = !!signals?.xbox;
 
@@ -785,13 +836,13 @@ export default function ReleaseDetailPage() {
                     background: "#f8fafc",
                   }}
                 >
-                  {/* Steam (portfolio playtime) - only for Steam releases */}
+                  {/* Steam */}
                   {isSteamRelease && (
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                       <div style={{ fontWeight: 900 }}>Steam</div>
                       <div style={{ color: "#0f172a" }}>
                         {steamMinutes > 0 ? (
-                          <span>🎮 {minutesToHours(steamMinutes)}</span>
+                          <span>🤖 {minutesToHours(steamMinutes)}</span>
                         ) : (
                           <span style={{ color: "#64748b" }}>—</span>
                         )}
@@ -931,11 +982,14 @@ export default function ReleaseDetailPage() {
                       </div>
                     )}
 
-                    {!psnTrophyLoading && !psnTrophyErr && psnTrophies && (
-                      <div style={{ padding: 12 }}>
-                        <TrophyList trophies={psnTrophies} />
-                      </div>
-                    )}
+                    {!psnTrophyLoading && !psnTrophyErr && psnTrophies && (() => {
+                      const psnTrophiesSorted = sortEarnedFirst(psnTrophies);
+                      return (
+                        <div style={{ padding: 12 }}>
+                          <TrophyList trophies={psnTrophiesSorted} />
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -1037,11 +1091,15 @@ export default function ReleaseDetailPage() {
 
                 {/* Tiny stats pills like Backloggd */}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  {steamMinutes > 0 && (
-                    <span style={pill("#ecfeff")}>
-                      Steam {minutesToHours(steamMinutes)}
-                    </span>
-                  )}
+                  {hasSteamSignal && steamMinutes > 0 && (() => {
+                    const steamSummary = steamAchievements && steamAchievements.length > 0 ? computeEarnedSummary(steamAchievements) : null;
+                    return (
+                      <span style={pill("#ecfeff")}>
+                        Steam {minutesToHours(steamMinutes)}
+                        {steamSummary ? ` • ${steamSummary.earned}/${steamSummary.total} (${steamSummary.percent}%)` : ""}
+                      </span>
+                    );
+                  })()}
 
                   {psnMinutes > 0 && (
                     <span style={pill("#f0f9ff")}>
@@ -1049,17 +1107,39 @@ export default function ReleaseDetailPage() {
                     </span>
                   )}
 
-                  {psnProgress != null && (
-                    <span style={pill("#f0f9ff")}>PSN trophies {Math.round(Number(psnProgress))}%</span>
-                  )}
+                  {psnProgress != null && (() => {
+                    const psnTrophySummary = psnTrophies && psnTrophies.length > 0 ? computeEarnedSummary(psnTrophies) : null;
+                    return (
+                      <span style={pill("#f0f9ff")}>
+                        PSN trophies {Math.round(Number(psnProgress))}%
+                        {psnTrophySummary ? ` • ${psnTrophySummary.earned}/${psnTrophySummary.total} (${psnTrophySummary.percent}%)` : ""}
+                      </span>
+                    );
+                  })()}
 
-                  {hasXbox && signals.xbox?.gamerscore_total != null && Number(signals.xbox.gamerscore_total) > 0 ? (
-                    <span style={pill("#f0fdf4")}>
-                      Xbox GS {signals.xbox.gamerscore_earned ?? 0}/{signals.xbox.gamerscore_total}
-                    </span>
-                  ) : null}
+                  {hasXbox && signals.xbox?.gamerscore_total != null && Number(signals.xbox.gamerscore_total) > 0 ? (() => {
+                    const xboxSummary = xboxAchievements && xboxAchievements.length > 0 ? computeEarnedSummary(xboxAchievements) : null;
+                    const xboxAchievementsPercent = signals.xbox?.achievements_total != null && Number(signals.xbox.achievements_total) > 0
+                      ? Math.round(((signals.xbox.achievements_earned ?? 0) / Number(signals.xbox.achievements_total)) * 100)
+                      : null;
+                    return (
+                      <span style={pill("#f0fdf4")}>
+                        Xbox GS {signals.xbox.gamerscore_earned ?? 0}/{signals.xbox.gamerscore_total}
+                        {xboxSummary ? ` • ${xboxSummary.earned}/${xboxSummary.total} (${xboxSummary.percent}%)` : xboxAchievementsPercent != null ? ` • ${signals.xbox.achievements_earned ?? 0}/${signals.xbox.achievements_total} (${xboxAchievementsPercent}%)` : ""}
+                      </span>
+                    );
+                  })() : null}
 
-                  {!hasSteam && !hasPsn && !hasXbox ? <span style={pill("#fff7ed")}>No sync signal</span> : null}
+                  {raAchievements && raAchievements.length > 0 && (() => {
+                    const raSummary = computeEarnedSummary(raAchievements);
+                    return (
+                      <span style={pill("#fef3c7")}>
+                        RA {raSummary.earned}/{raSummary.total} ({raSummary.percent}%)
+                      </span>
+                    );
+                  })()}
+
+                  {!hasSteam && !hasPsn && !hasXbox && !raAchievements ? <span style={pill("#fff7ed")}>No sync signal</span> : null}
                 </div>
               </div>
             </div>
@@ -1136,8 +1216,8 @@ export default function ReleaseDetailPage() {
               <div style={{ fontWeight: 1000, marginBottom: 10 }}>Signals</div>
 
               <div style={{ display: "grid", gap: 10 }}>
-                {/* Steam - only for Steam releases */}
-                {isSteamRelease && (
+                {/* Steam - show if signal exists */}
+                {hasSteamSignal && (
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                     <div style={{ fontWeight: 900 }}>Steam</div>
                     {steamMinutes > 0 ? (
@@ -1252,23 +1332,28 @@ export default function ReleaseDetailPage() {
                 </div>
               ) : null}
 
-              {psnTrophies && psnTrophies.length > 0 ? (
-                <>
-                  {/* Summary row */}
-                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
-                    Earned <b>{psnTrophies.filter((t) => t.earned).length}</b> / {psnTrophies.length}
-                  </div>
+              {psnTrophies && psnTrophies.length > 0 ? (() => {
+                const psnTrophiesSorted = sortEarnedFirst(psnTrophies);
+                const psnTrophySummary = computeEarnedSummary(psnTrophiesSorted);
+                return (
+                  <>
+                    {/* Summary row */}
+                    {psnTrophySummary ? (
+                      <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                        Earned <b>{psnTrophySummary.earned}</b> / {psnTrophySummary.total} • <b>{psnTrophySummary.percent}%</b>
+                      </div>
+                    ) : null}
 
-                  {/* Trophy grid */}
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-                      gap: 10,
-                      marginTop: 10,
-                    }}
-                  >
-                    {psnTrophies.map((t) => (
+                    {/* Trophy grid */}
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                        gap: 10,
+                        marginTop: 10,
+                      }}
+                    >
+                      {psnTrophiesSorted.map((t) => (
                       <div
                         key={t.trophyId}
                         style={{
@@ -1324,8 +1409,9 @@ export default function ReleaseDetailPage() {
                       </div>
                     ))}
                   </div>
-                </>
-              ) : null}
+                  </>
+                );
+              })() : null}
             </div>
 
             {/* Achievements (Xbox) - only show for Xbox releases */}
@@ -1396,23 +1482,28 @@ export default function ReleaseDetailPage() {
                 </div>
               ) : null}
 
-              {xboxAchievements && xboxAchievements.length > 0 ? (
-                <>
-                  {/* Summary row */}
-                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
-                    Earned <b>{xboxAchievements.filter((a) => a.earned).length}</b> / {xboxAchievements.length}
-                  </div>
+              {xboxAchievements && xboxAchievements.length > 0 ? (() => {
+                const xboxAchievementsSorted = sortEarnedFirst(xboxAchievements);
+                const xboxSummary = computeEarnedSummary(xboxAchievementsSorted);
+                return (
+                  <>
+                    {/* Summary row */}
+                    {xboxSummary ? (
+                      <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                        Earned <b>{xboxSummary.earned}</b> / {xboxSummary.total} • <b>{xboxSummary.percent}%</b>
+                      </div>
+                    ) : null}
 
-                  {/* Achievement grid */}
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-                      gap: 10,
-                      marginTop: 10,
-                    }}
-                  >
-                    {xboxAchievements.map((a) => (
+                    {/* Achievement grid */}
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                        gap: 10,
+                        marginTop: 10,
+                      }}
+                    >
+                      {xboxAchievementsSorted.map((a) => (
                       <div
                         key={a.achievement_id}
                         style={{
@@ -1474,13 +1565,14 @@ export default function ReleaseDetailPage() {
                         </div>
                       </div>
                     ))}
-                  </div>
-                </>
-              ) : null}
+                    </div>
+                  </>
+                );
+              })() : null}
             </div>
-            )}
+          )}
 
-            {/* RetroAchievements (RA) */}
+          {/* RetroAchievements (RA) */}
             <div
               style={{
                 border: "1px solid #e5e7eb",
@@ -1537,31 +1629,26 @@ export default function ReleaseDetailPage() {
                 </div>
               ) : null}
 
-              {raAchievements && raAchievements.length > 0 ? (
-                <>
-                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
-                    Earned <b>{raAchievements.filter((a) => a.earned).length}</b> / {raAchievements.length}
-                  </div>
+              {raAchievements && raAchievements.length > 0 ? (() => {
+                const raAchievementsSorted = sortEarnedFirst(raAchievements);
+                const raSummary = computeEarnedSummary(raAchievementsSorted);
+                return (
+                  <>
+                    {raSummary ? (
+                      <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                        Earned <b>{raSummary.earned}</b> / {raSummary.total} • <b>{raSummary.percent}%</b>
+                      </div>
+                    ) : null}
 
-                  {(() => {
-                    const raItems = Array.isArray(raAchievements) ? [...raAchievements] : [];
-                    raItems.sort((a, b) => {
-                      if (Boolean(a.earned) !== Boolean(b.earned)) return a.earned ? -1 : 1;
-                      const ta = a.earned_at ? new Date(a.earned_at).getTime() : 0;
-                      const tb = b.earned_at ? new Date(b.earned_at).getTime() : 0;
-                      return tb - ta;
-                    });
-
-                    return (
-                      <div
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-                          gap: 10,
-                          marginTop: 10,
-                        }}
-                      >
-                        {raItems.map((a: any) => (
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                        gap: 10,
+                        marginTop: 10,
+                      }}
+                    >
+                      {raAchievementsSorted.map((a: any) => (
                           <div
                             key={a.achievement_id || a.id}
                             style={{
@@ -1600,16 +1687,22 @@ export default function ReleaseDetailPage() {
                             </div>
                           </div>
                         ))}
-                      </div>
-                    );
-                  })()}
-                </>
-              ) : null}
+                    </div>
+                  </>
+                );
+              })() : null}
             </div>
 
             {/* Achievements (Steam) - only show for Steam releases */}
             {isSteamRelease && (
-              <div style={{ border: "1px solid #e5e7eb", borderRadius: 16, background: "white", padding: 16 }}>
+              <div
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 16,
+                  background: "white",
+                  padding: 16,
+                }}
+              >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                   <div style={{ fontWeight: 900, marginBottom: 6 }}>Achievements (Steam)</div>
 
@@ -1630,21 +1723,100 @@ export default function ReleaseDetailPage() {
                   </button>
                 </div>
 
-                {steamAchievementErr ? <div style={{ color: "#b91c1c", marginTop: 6 }}>{steamAchievementErr}</div> : null}
-                {steamAchievementNote ? <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>{steamAchievementNote}</div> : null}
-
-                {steamAchievements && steamAchievements.length > 0 ? (
-                  <>
-                    <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
-                      Earned <b>{steamAchievements.filter((a) => a.earned).length}</b> / {steamAchievements.length}
-                    </div>
-                    <div style={{ marginTop: 10 }}>
-                      <AchievementList achievements={steamAchievements} earned={[]} />
-                    </div>
-                  </>
-                ) : steamAchievements && steamAchievements.length === 0 ? (
-                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>No Steam achievements found for this release.</div>
+                {steamAchievementErr ? (
+                  <div style={{ color: "#b91c1c", marginTop: 6 }}>{steamAchievementErr}</div>
                 ) : null}
+
+                {steamAchievementNote ? (
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>{steamAchievementNote}</div>
+                ) : null}
+
+                {steamAchievementLoading ? (
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>Loading achievements…</div>
+                ) : steamAchievements && steamAchievements.length === 0 ? (
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+                    No Steam achievements found for this app.
+                  </div>
+                ) : null}
+
+                {steamAchievements && steamAchievements.length > 0 ? (() => {
+                  const steamAchievementsSorted = sortEarnedFirst(steamAchievements);
+                  const steamSummary = computeEarnedSummary(steamAchievementsSorted);
+                  return (
+                    <>
+                      {steamSummary ? (
+                        <div style={{ color: "#64748b", fontSize: 13, marginTop: 8 }}>
+                          Earned <b>{steamSummary.earned}</b> / {steamSummary.total} • <b>{steamSummary.percent}%</b>
+                        </div>
+                      ) : null}
+
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+                          gap: 10,
+                          marginTop: 10,
+                        }}
+                      >
+                        {steamAchievementsSorted.map((a: any) => (
+                        <div
+                          key={a.achievement_id}
+                          style={{
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 12,
+                            padding: 10,
+                            background: a.earned ? "#f8fafc" : "white",
+                            display: "flex",
+                            gap: 10,
+                            alignItems: "flex-start",
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: 44,
+                              height: 44,
+                              borderRadius: 10,
+                              border: "1px solid #e5e7eb",
+                              background: "#f8fafc",
+                              overflow: "hidden",
+                              flexShrink: 0,
+                            }}
+                          >
+                            {a.achievement_icon_url ? (
+                              <img
+                                src={a.achievement_icon_url}
+                                alt={a.achievement_name ?? "Achievement"}
+                                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                              />
+                            ) : null}
+                          </div>
+
+                          <div style={{ flex: 1 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                              <div style={{ fontWeight: 900, lineHeight: 1.2 }}>
+                                {a.achievement_name ?? "—"}
+                              </div>
+                              <div style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>
+                                {a.earned ? " • ✅" : ""}
+                              </div>
+                            </div>
+
+                            <div style={{ color: "#334155", fontSize: 13, marginTop: 4, lineHeight: 1.35 }}>
+                              {a.achievement_description ?? "—"}
+                            </div>
+
+                            {a.earned && a.earned_at ? (
+                              <div style={{ color: "#64748b", fontSize: 12, marginTop: 6 }}>
+                                Earned: {new Date(a.earned_at).toLocaleString()}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                      </div>
+                    </>
+                  );
+                })() : null}
               </div>
             )}
 
@@ -1749,12 +1921,28 @@ function AchievementList({ achievements, earned }: { achievements: any[]; earned
   const items = Array.isArray(achievements) ? achievements : [];
   if (!items.length) return <div style={{ color: "#64748b" }}>No achievements returned.</div>;
 
+  // Merge earned status from both earned array and earned field
+  const itemsWithEarned = items.map((a: any) => {
+    const key = String(a?.achievement_id ?? "");
+    const isEarned = earnedSet.has(key) || Boolean(a?.earned);
+    return { ...a, earned: isEarned };
+  });
+
+  const sortedItems = sortEarnedFirst(itemsWithEarned);
+  const summary = computeEarnedSummary(sortedItems);
+
   return (
-    <div style={{ display: "grid", gap: 10 }}>
-      {items.map((a: any) => {
+    <div>
+      {summary ? (
+        <div style={{ color: "#64748b", fontSize: 13, marginBottom: 10 }}>
+          Earned <b>{summary.earned}</b> / {summary.total} • <b>{summary.percent}%</b>
+        </div>
+      ) : null}
+      <div style={{ display: "grid", gap: 10 }}>
+        {sortedItems.map((a: any) => {
         const key = String(a?.achievement_id ?? "");
-        // Check both the earned array and the earned field on the achievement object
-        const isEarned = earnedSet.has(key) || Boolean(a?.earned);
+        // Use the merged earned status from sorting
+        const isEarned = Boolean(a.earned);
 
         const name = a?.achievement_name ?? "Untitled achievement";
         const description = a?.achievement_description ?? "";
@@ -1829,6 +2017,7 @@ function AchievementList({ achievements, earned }: { achievements: any[]; earned
           </div>
         );
       })}
+      </div>
     </div>
   );
 }

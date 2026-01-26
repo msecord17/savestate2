@@ -292,7 +292,7 @@ export async function GET(req: Request) {
           : 0;
 
       const sources: string[] = [];
-      if (steamMinutes > 0) sources.push("Steam");
+      if (String(rel.platform_key ?? "").toLowerCase() === "steam") sources.push("Steam");
       if (psn) sources.push("PSN");
       if (xb) sources.push("Xbox");
 

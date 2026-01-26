@@ -88,6 +88,7 @@ export async function POST() {
   let createdReleases = 0;
   let upserted = 0;
   let skipped = 0;
+  let errors: any[] = [];
 
   // Helper: find release_id by appid
   async function findReleaseIdForApp(appid: string) {
@@ -155,22 +156,17 @@ export async function POST() {
 
       releaseId = newRelease.id;
       createdReleases += 1;
-
-      // Insert mapping into release_external_ids
-      const { error: mapErr } = await supabaseAdmin
-        .from("release_external_ids")
-        .insert({
-          release_id: releaseId,
-          source: "steam",
-          external_id: appid,
-        });
-
-      if (mapErr) {
-        // Not fatal: we can still proceed for this run
-      }
     } else {
       mapped += 1;
     }
+
+    // Ensure steam external ID mapping exists (idempotent) - for both new and existing releases
+    await supabaseAdmin
+      .from("release_external_ids")
+      .upsert(
+        { release_id: releaseId, source: "steam", external_id: appid },
+        { onConflict: "source,external_id" }
+      );
 
     // Upsert steam progress
     const { error: upErr } = await supabaseAdmin
@@ -188,7 +184,14 @@ export async function POST() {
       );
 
     if (upErr) {
-      console.log("[steam/sync] upsert failed", { appid, name, releaseId, msg: upErr.message });
+      errors.push({
+        appid,
+        releaseId,
+        message: upErr.message,
+        details: (upErr as any).details,
+        hint: (upErr as any).hint,
+        code: (upErr as any).code,
+      });
       skipped += 1;
       continue;
     }
@@ -204,12 +207,14 @@ export async function POST() {
       .maybeSingle();
 
     if (!existingEntry) {
-      await supabaseAdmin.from("portfolio_entries").insert({
+      const { error: peErr } = await supabaseAdmin.from("portfolio_entries").insert({
         user_id: user.id,
         release_id: releaseId,
         status: "owned",
         updated_at: nowIso(),
       });
+
+      if (peErr) console.warn("portfolio insert failed", peErr.message);
     }
   }
 
@@ -220,5 +225,6 @@ export async function POST() {
     created_releases: createdReleases,
     upserted_progress: upserted,
     skipped,
+    errors,
   });
 }
