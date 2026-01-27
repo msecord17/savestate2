@@ -203,6 +203,81 @@ export async function GET(
         }
       : null;
 
+    // 5) RA progress for this release
+    // Try achievement cache first (detailed data), fallback to game progress (synced data)
+    let ra: any = null;
+
+    // Primary: Check achievement cache (populated when achievements are loaded)
+    const { data: raCache, error: raErr } = await supabase
+      .from("ra_achievement_cache")
+      .select("payload, fetched_at")
+      .eq("user_id", user.id)
+      .eq("release_id", id)
+      .maybeSingle();
+
+    if (raErr) {
+      console.warn("[releases/id] RA cache read error:", raErr.message);
+    }
+
+    if (raCache?.payload) {
+      const progress = raCache.payload.progress;
+      if (progress?.numAchievements != null || progress?.numAwardedToUser != null) {
+        ra = {
+          numAwardedToUser: progress.numAwardedToUser ?? null,
+          numAchievements: progress.numAchievements ?? null,
+          last_updated_at: raCache.fetched_at ?? null,
+          ra_status: raCache.payload.ra_status ?? null,
+          ra_num_achievements: raCache.payload.ra_num_achievements ?? null,
+        };
+      } else if (raCache.payload.ra_status) {
+        // Include status even if no progress data (e.g., "no_set" or "unmapped")
+        ra = {
+          numAwardedToUser: null,
+          numAchievements: null,
+          last_updated_at: raCache.fetched_at ?? null,
+          ra_status: raCache.payload.ra_status ?? null,
+          ra_num_achievements: raCache.payload.ra_num_achievements ?? null,
+        };
+      }
+    }
+
+    // Fallback: Check ra_game_progress via release_external_ids mapping (from sync)
+    if (!ra) {
+      const { data: raMapping } = await supabase
+        .from("release_external_ids")
+        .select("external_id")
+        .eq("release_id", id)
+        .eq("source", "ra")
+        .maybeSingle();
+
+      if (raMapping?.external_id) {
+        const raGameId = Number(raMapping.external_id);
+        if (isFinite(raGameId) && raGameId > 0) {
+          const { data: raProgress } = await supabase
+            .from("ra_game_progress")
+            .select("achievements_earned, achievements_total, updated_at")
+            .eq("user_id", user.id)
+            .eq("ra_game_id", raGameId)
+            .maybeSingle();
+
+          if (raProgress) {
+            // ra_game_progress is from sync, so if we have data, there's a set
+            // We can't distinguish "no_set" from sync data, so we infer "has_set" if counts > 0
+            const hasAchievements = (raProgress.achievements_total ?? 0) > 0;
+            ra = {
+              numAwardedToUser: raProgress.achievements_earned ?? null,
+              numAchievements: raProgress.achievements_total ?? null,
+              last_updated_at: raProgress.updated_at ?? null,
+              // Infer status: if we have achievement counts from sync, assume "has_set"
+              // Note: This is fallback data, so status might not be as accurate as cache
+              ra_status: hasAchievements ? "has_set" : null,
+              ra_num_achievements: raProgress.achievements_total ?? null,
+            };
+          }
+        }
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       release,
@@ -211,6 +286,7 @@ export async function GET(
         steam: steam ?? null,
         psn: psn ?? null,
         xbox: xbox ?? null,
+        ra: ra ?? null,
       },
     });
   } catch (e: any) {

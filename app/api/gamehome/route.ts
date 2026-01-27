@@ -30,6 +30,10 @@ type ReleaseCard = {
   xbox_gamerscore_total: number | null;
   xbox_last_updated_at: string | null;
 
+  // RA
+  ra_achievements_earned: number | null;
+  ra_achievements_total: number | null;
+
   sources: string[];
   lastSignalAt: string | null;
 };
@@ -50,6 +54,9 @@ type GameCard = {
   xbox_achievements_total: number | null;
   xbox_gamerscore_earned: number | null;
   xbox_gamerscore_total: number | null;
+
+  ra_achievements_earned: number | null;
+  ra_achievements_total: number | null;
 
   platforms: string[];
   sources: string[];
@@ -171,6 +178,16 @@ function reduceToGameCards(releaseCards: ReleaseCard[]): GameCard[] {
       }
     }
 
+    let ra_achievements_earned: number | null = null;
+    let ra_achievements_total: number | null = null;
+    for (const r of rels) {
+      const tot = r.ra_achievements_total ?? null;
+      if (tot != null && (ra_achievements_total == null || tot > ra_achievements_total)) {
+        ra_achievements_total = Number(tot);
+        ra_achievements_earned = r.ra_achievements_earned != null ? Number(r.ra_achievements_earned) : null;
+      }
+    }
+
     out.push({
       game_id,
       title,
@@ -187,6 +204,9 @@ function reduceToGameCards(releaseCards: ReleaseCard[]): GameCard[] {
       xbox_achievements_total,
       xbox_gamerscore_earned,
       xbox_gamerscore_total,
+
+      ra_achievements_earned,
+      ra_achievements_total,
 
       platforms,
       sources,
@@ -259,6 +279,21 @@ export async function GET(req: Request) {
     }
   }
 
+  const raByRelease: Record<string, any> = {};
+  if (releaseIds.length) {
+    const { data: raRows, error: rErr } = await supabase
+      .from("ra_achievement_cache")
+      .select("release_id, payload, fetched_at")
+      .eq("user_id", user.id)
+      .in("release_id", releaseIds);
+
+    if (!rErr && Array.isArray(raRows)) {
+      for (const r of raRows as any[]) {
+        if (r?.release_id) raByRelease[String(r.release_id)] = r;
+      }
+    }
+  }
+
   // 3B) Steam progress (by release_id)
   const steamByRelease: Record<string, any> = {};
   if (releaseIds.length) {
@@ -284,6 +319,11 @@ export async function GET(req: Request) {
       const psn = psnByRelease[rid] ?? null;
       const xb = xboxByRelease[rid] ?? null;
       const steam = steamByRelease[rid] ?? null;
+      const ra = raByRelease[rid]?.payload ?? null;
+
+      const raAchievements = Array.isArray(ra?.achievements) ? ra.achievements : [];
+      const raEarned = raAchievements.filter((a: any) => a?.earned).length;
+      const raTotal = raAchievements.length;
 
       // Only count Steam playtime for Steam releases
       const steamMinutes =
@@ -295,17 +335,20 @@ export async function GET(req: Request) {
       if (String(rel.platform_key ?? "").toLowerCase() === "steam") sources.push("Steam");
       if (psn) sources.push("PSN");
       if (xb) sources.push("Xbox");
+      if (raTotal > 0) sources.push("RA");
 
       const psnUpdated = toIsoOrNull(psn?.last_updated_at);
       const xbUpdated = toIsoOrNull(xb?.last_updated_at);
       const steamUpdated = toIsoOrNull(steam?.last_updated_at);
       const entryUpdated = toIsoOrNull(r?.updated_at);
+      const raUpdated = toIsoOrNull(raByRelease[rid]?.fetched_at);
 
       let lastSignalAt: string | null = null;
       // Use the most recent signal across all sources (including portfolio entry stamp)
       lastSignalAt = maxIso(lastSignalAt, psnUpdated);
       lastSignalAt = maxIso(lastSignalAt, xbUpdated);
       lastSignalAt = maxIso(lastSignalAt, steamUpdated);
+      lastSignalAt = maxIso(lastSignalAt, raUpdated);
       if (steamMinutes > 0) lastSignalAt = maxIso(lastSignalAt, entryUpdated);
 
       return {
@@ -331,6 +374,9 @@ export async function GET(req: Request) {
         xbox_gamerscore_earned: xb?.gamerscore_earned != null ? Number(xb.gamerscore_earned) : null,
         xbox_gamerscore_total: xb?.gamerscore_total != null ? Number(xb.gamerscore_total) : null,
         xbox_last_updated_at: xbUpdated,
+
+        ra_achievements_earned: raTotal > 0 ? raEarned : null,
+        ra_achievements_total: raTotal > 0 ? raTotal : null,
 
         sources,
         lastSignalAt,

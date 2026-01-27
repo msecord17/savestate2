@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import ProgressBlock, { type ProgressSignal } from "@/components/progress/ProgressBlock";
 
 type Card = {
   // game mode
@@ -29,6 +30,9 @@ type Card = {
   xbox_achievements_total: number | null;
   xbox_gamerscore_earned: number | null;
   xbox_gamerscore_total: number | null;
+
+  ra_achievements_earned: number | null;
+  ra_achievements_total: number | null;
 
   sources: string[];
   lastSignalAt: string | null;
@@ -470,56 +474,28 @@ export default function GameHomePage() {
 
                       {/* details block */}
                       {(() => {
-                        const steamMin = Number(c.steam_playtime_minutes || 0);
-                        const psnMin = c.psn_playtime_minutes != null ? Number(c.psn_playtime_minutes) : 0;
-                        const xboxGsTotal = Number(c.xbox_gamerscore_total || 0);
-                        const xboxAchTotal = Number(c.xbox_achievements_total || 0);
+                        const signals: ProgressSignal[] = [];
 
-                        return (
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: 12,
-                              flexWrap: "wrap",
-                              marginTop: 8,
-                              fontSize: 13,
-                              color: "#0f172a",
-                            }}
-                          >
-                            {steamMin > 0 && (
-                              <span title="Steam playtime">🎮 {minutesToHours(steamMin)}</span>
-                            )}
+                        if (hasSteam) {
+                          signals.push({
+                            source: "steam",
+                            label: "Steam",
+                            playtimeMinutes: c.steam_playtime_minutes,
+                            lastUpdatedAt: c.lastSignalAt ?? null,
+                          });
+                        }
 
-                            {psnMin > 0 && (
-                              <span title="PlayStation playtime">🕹️ {minutesToHours(psnMin)}</span>
-                            )}
+                        if (hasPsn) {
+                          signals.push({
+                            source: "psn",
+                            label: "PSN",
+                            progressPct: c.psn_trophy_progress ?? undefined,
+                            earned: c.psn_trophies_earned ?? undefined,
+                            total: c.psn_trophies_total ?? undefined,
+                          });
+                        }
 
-                            {c.psn_trophy_progress != null && (
-                              <span title="PlayStation trophy progress">🏆 {Math.round(Number(c.psn_trophy_progress))}%</span>
-                            )}
-
-                            {xboxGsTotal > 0 && (
-                              <span title="Xbox gamerscore">
-                                ✖︎ {Number(c.xbox_gamerscore_earned ?? 0)}/{xboxGsTotal}
-                              </span>
-                            )}
-
-                            {xboxAchTotal > 0 && (
-                              <span title="Xbox achievements">
-                                🏅 {Number(c.xbox_achievements_earned ?? 0)}/{xboxAchTotal}
-                              </span>
-                            )}
-
-                            {/* If literally nothing exists, show a placeholder */}
-                            {steamMin <= 0 &&
-                              psnMin <= 0 &&
-                              c.psn_trophy_progress == null &&
-                              xboxGsTotal <= 0 &&
-                              xboxAchTotal <= 0 && (
-                                <span style={{ color: "#64748b" }}>No activity data yet</span>
-                              )}
-                          </div>
-                        );
+                        return <ProgressBlock signals={signals} />;
                       })()}
                     </div>
                   </div>

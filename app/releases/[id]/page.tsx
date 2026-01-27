@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import ProgressBlock, { type ProgressSignal } from "@/components/progress/ProgressBlock";
 
 
 type ReleaseDetail = {
@@ -47,6 +48,13 @@ type Signals = {
     gamerscore_earned: number | null;
     gamerscore_total: number | null;
     last_updated_at: string | null;
+  };
+  ra: null | {
+    numAwardedToUser: number | null;
+    numAchievements: number | null;
+    ra_status?: "unmapped" | "no_set" | "has_set" | null;
+    ra_num_achievements?: number | null;
+    last_updated_at?: string | null;
   };
 };
 
@@ -238,6 +246,9 @@ export default function ReleaseDetailPage() {
   const [raErr, setRaErr] = useState("");
   const [raLoading, setRaLoading] = useState(false);
   const [raNote, setRaNote] = useState("");
+  const [raStatus, setRaStatus] = useState<"unmapped" | "no_set" | "has_set" | null>(null);
+  const [raFetchedAt, setRaFetchedAt] = useState<string | null>(null);
+  const [raGameId, setRaGameId] = useState<number | null>(null);
 
   // Achievement state (Steam) - for main column display
   const [steamAchievements, setSteamAchievements] = useState<Achievement[] | null>(null);
@@ -392,6 +403,9 @@ export default function ReleaseDetailPage() {
       if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
 
       setRaNote(data?.note || "");
+      setRaStatus(data?.ra_status ?? null);
+      setRaFetchedAt(data?.fetched_at ?? null);
+      setRaGameId(data?.ra_game_id ?? null);
       setRaAchievements(Array.isArray(data?.achievements) ? data.achievements : []);
     } catch (e: any) {
       setRaErr(e?.message || "Failed to load RetroAchievements");
@@ -545,6 +559,11 @@ export default function ReleaseDetailPage() {
     if (key === "steam") {
       loadSteamAchievements();
     }
+
+    // Note: RA achievements are loaded lazily when user clicks "Load" button.
+    // This hydrates ra_achievement_cache, which then makes signals.ra show up on next page load.
+    // This is consistent with Option A: mapping creates release_external_ids,
+    // and first view of achievements hydrates the cache.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [releaseId, release]);
 
@@ -665,6 +684,10 @@ export default function ReleaseDetailPage() {
   const hasSteam = hasSteamSignal && steamMinutes > 0;
   const hasPsn = !!signals?.psn;
   const hasXbox = !!signals?.xbox;
+
+  // Calculate Steam achievement counts
+  const steamAchievementsEarned = steamAchievements ? steamAchievements.filter((a) => a.earned).length : null;
+  const steamAchievementsTotal = steamAchievements ? steamAchievements.length : null;
 
   const lastSignal = useMemo(() => {
     const a = portfolio?.updated_at ?? null;
@@ -836,48 +859,44 @@ export default function ReleaseDetailPage() {
                     background: "#f8fafc",
                   }}
                 >
-                  {/* Steam */}
-                  {isSteamRelease && (
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                      <div style={{ fontWeight: 900 }}>Steam</div>
-                      <div style={{ color: "#0f172a" }}>
-                        {steamMinutes > 0 ? (
-                          <span>🤖 {minutesToHours(steamMinutes)}</span>
-                        ) : (
-                          <span style={{ color: "#64748b" }}>—</span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* PSN trophies */}
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                    <div style={{ fontWeight: 900 }}>PlayStation</div>
-                    <div style={{ color: "#0f172a", textAlign: "right" }}>
-                      {signals?.psn ? (
-                        <>
-                          <div>
-                            {signals.psn.trophy_progress != null ? (
-                              <span>🏆 {Math.round(Number(signals.psn.trophy_progress))}%</span>
-                            ) : (
-                              <span style={{ color: "#64748b" }}>🏆 —</span>
-                            )}
-                            {"  "}
-                            {signals.psn.trophies_total ? (
-                              <span style={{ color: "#64748b" }}>
-                                ({signals.psn.trophies_earned ?? 0}/{signals.psn.trophies_total})
-                              </span>
-                            ) : null}
-                          </div>
-                          <div style={{ marginTop: 4, color: "#64748b", fontSize: 13 }}>
-                            🕹️ {minutesToHours(signals.psn.playtime_minutes)}
-                          </div>
-                        </>
-                      ) : (
-                        <span style={{ color: "#64748b" }}>—</span>
-                      )}
-                    </div>
-                  </div>
+                  <ProgressBlock
+                    signals={[
+                      ...(isSteamRelease && signals?.steam
+                        ? [
+                            {
+                              source: "steam" as const,
+                              label: "Steam",
+                              playtimeMinutes: signals.steam.playtime_minutes ?? undefined,
+                              earned: steamAchievementsEarned ?? undefined,
+                              total: steamAchievementsTotal ?? undefined,
+                            },
+                          ]
+                        : []),
+                      ...(signals?.psn
+                        ? [
+                            {
+                              source: "psn" as const,
+                              label: "PlayStation",
+                              playtimeMinutes: signals.psn.playtime_minutes ?? undefined,
+                              earned: signals.psn.trophies_earned ?? undefined,
+                              total: signals.psn.trophies_total ?? undefined,
+                            },
+                          ]
+                        : []),
+                      ...(signals?.ra
+                        ? [
+                            {
+                              source: "ra" as const,
+                              label: "RetroAchievements",
+                              earned: signals.ra.numAwardedToUser ?? undefined,
+                              total: signals.ra.numAchievements ?? undefined,
+                              ra_status: signals.ra.ra_status ?? undefined,
+                              lastUpdatedAt: signals.ra.last_updated_at ?? null,
+                            },
+                          ]
+                        : []),
+                    ]}
+                  />
 
                   {/* PSN progress bar */}
                   {signals?.psn && pct(signals.psn.trophy_progress) != null ? (
@@ -1215,78 +1234,59 @@ export default function ReleaseDetailPage() {
             >
               <div style={{ fontWeight: 1000, marginBottom: 10 }}>Signals</div>
 
-              <div style={{ display: "grid", gap: 10 }}>
-                {/* Steam - show if signal exists */}
-                {hasSteamSignal && (
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                    <div style={{ fontWeight: 900 }}>Steam</div>
-                    {steamMinutes > 0 ? (
-                      <div style={{ color: "#334155" }}>
-                        Playtime: <b>{minutesToHours(steamMinutes)}</b>
-                        {portfolio?.updated_at ? (
-                          <span style={{ color: "#64748b" }}> • {timeAgo(portfolio.updated_at) ?? ""}</span>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <div style={{ color: "#94a3b8" }}>—</div>
-                    )}
-                  </div>
-                )}
+              {(() => {
+                const progressSignals: ProgressSignal[] = [];
 
-                {/* PSN */}
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <div style={{ fontWeight: 900 }}>PlayStation</div>
-                  {signals?.psn ? (
-                    <div style={{ color: "#334155" }}>
-                      {psnMinutes > 0 ? (
-                        <>
-                          Playtime: <b>{minutesToHours(psnMinutes)}</b>
-                          {" • "}
-                        </>
-                      ) : null}
-                      {psnProgress != null ? (
-                        <>
-                          Trophies: <b>{Math.round(Number(psnProgress))}%</b>
-                        </>
-                      ) : (
-                        <span style={{ color: "#94a3b8" }}>Trophies —</span>
-                      )}
-                      {signals.psn.last_updated_at ? (
-                        <span style={{ color: "#64748b" }}> • {timeAgo(signals.psn.last_updated_at) ?? ""}</span>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <div style={{ color: "#94a3b8" }}>—</div>
-                  )}
-                </div>
+                if (signals?.steam) {
+                  progressSignals.push({
+                    source: "steam",
+                    label: "Steam",
+                    playtimeMinutes: signals.steam.playtime_minutes ?? portfolio?.playtime_minutes ?? undefined,
+                    progressPct:
+                      steamAchievementsTotal != null && steamAchievementsTotal > 0
+                        ? Math.round(
+                            ((steamAchievementsEarned ?? 0) / steamAchievementsTotal) * 100
+                          )
+                        : undefined,
+                    earned: steamAchievementsEarned ?? undefined,
+                    total: steamAchievementsTotal ?? undefined,
+                    lastUpdatedAt: signals.steam.last_updated_at ?? null,
+                  });
+                }
 
-                {/* Xbox */}
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <div style={{ fontWeight: 900 }}>Xbox</div>
-                  {signals?.xbox ? (
-                    <div style={{ color: "#334155" }}>
-                      {signals.xbox.gamerscore_total != null && Number(signals.xbox.gamerscore_total) > 0 ? (
-                        <>
-                          GS: <b>{signals.xbox.gamerscore_earned ?? 0}/{signals.xbox.gamerscore_total}</b>
-                          {" • "}
-                        </>
-                      ) : null}
-                      {signals.xbox.achievements_total != null && Number(signals.xbox.achievements_total) > 0 ? (
-                        <>
-                          Achievements: <b>{signals.xbox.achievements_earned ?? 0}/{signals.xbox.achievements_total}</b>
-                        </>
-                      ) : (
-                        <span style={{ color: "#94a3b8" }}>Achievements —</span>
-                      )}
-                      {signals.xbox.last_updated_at ? (
-                        <span style={{ color: "#64748b" }}> • {timeAgo(signals.xbox.last_updated_at) ?? ""}</span>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <div style={{ color: "#94a3b8" }}>—</div>
-                  )}
-                </div>
-              </div>
+                if (signals?.psn) {
+                  progressSignals.push({
+                    source: "psn",
+                    label: "PlayStation",
+                    progressPct: signals.psn.trophy_progress ?? undefined,
+                    earned: signals.psn.trophies_earned ?? undefined,
+                    total: signals.psn.trophies_total ?? undefined,
+                    playtimeMinutes: signals.psn.playtime_minutes ?? undefined,
+                    lastUpdatedAt: signals.psn.last_updated_at ?? null,
+                  });
+                }
+
+                if (signals?.ra) {
+                  progressSignals.push({
+                    source: "ra",
+                    label: "RetroAchievements",
+                    progressPct:
+                      signals.ra.numAchievements != null && signals.ra.numAchievements > 0
+                        ? Math.round(
+                            ((signals.ra.numAwardedToUser ?? 0) /
+                              signals.ra.numAchievements) *
+                              100
+                          )
+                        : undefined,
+                    earned: signals.ra.numAwardedToUser ?? undefined,
+                    total: signals.ra.numAchievements ?? undefined,
+                    ra_status: signals.ra.ra_status ?? undefined,
+                    lastUpdatedAt: signals.ra.last_updated_at ?? null,
+                  });
+                }
+
+                return <ProgressBlock signals={progressSignals} />;
+              })()}
             </div>
 
             {/* Trophies (PSN) */}
@@ -1582,7 +1582,19 @@ export default function ReleaseDetailPage() {
               }}
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                <div style={{ fontWeight: 900, marginBottom: 6 }}>Achievements (RetroAchievements)</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={{ fontWeight: 900, marginBottom: 6 }}>Achievements (RetroAchievements)</div>
+                  {raGameId ? (
+                    <a
+                      href={`https://retroachievements.org/game/${raGameId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ fontSize: 13, textDecoration: "underline", opacity: 0.8, color: "#2563eb" }}
+                    >
+                      View on RetroAchievements
+                    </a>
+                  ) : null}
+                </div>
 
                 <div style={{ display: "flex", gap: 8 }}>
                   <button
@@ -1623,7 +1635,24 @@ export default function ReleaseDetailPage() {
               {raErr ? <div style={{ color: "#b91c1c", marginTop: 6 }}>{raErr}</div> : null}
               {raNote ? <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>{raNote}</div> : null}
 
-              {raAchievements && raAchievements.length === 0 ? (
+              {/* Show status messages */}
+              {!raErr && raStatus === "unmapped" && (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+                  Not mapped
+                </div>
+              )}
+              {!raErr && raStatus === "no_set" && (
+                <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
+                  No set exists yet (community-created)
+                  {raFetchedAt && (
+                    <span style={{ marginLeft: 8, opacity: 0.7 }}>
+                      • Checked {new Date(raFetchedAt).toLocaleDateString()}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {raAchievements && raAchievements.length === 0 && raStatus !== "unmapped" && raStatus !== "no_set" ? (
                 <div style={{ color: "#64748b", fontSize: 13, marginTop: 6 }}>
                   No RetroAchievements found for this release yet.
                 </div>
@@ -1661,6 +1690,28 @@ export default function ReleaseDetailPage() {
                               alignItems: "flex-start",
                             }}
                           >
+                            {a.achievement_icon_url ? (
+                              <div
+                                style={{
+                                  width: 64,
+                                  height: 64,
+                                  borderRadius: 8,
+                                  overflow: "hidden",
+                                  flexShrink: 0,
+                                  background: "#f1f5f9",
+                                }}
+                              >
+                                <img
+                                  src={a.achievement_icon_url}
+                                  alt={a.achievement_name ?? "Achievement"}
+                                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                                  onError={(e) => {
+                                    // Fallback if image fails to load
+                                    (e.target as HTMLImageElement).style.display = "none";
+                                  }}
+                                />
+                              </div>
+                            ) : null}
                             <div style={{ flex: 1 }}>
                               <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                                 <div style={{ fontWeight: 900, lineHeight: 1.2 }}>

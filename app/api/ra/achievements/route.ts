@@ -2,12 +2,27 @@ import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { raGetGameInfoAndUserProgress } from "@/lib/ra/server";
 
-const CACHE_TTL_MINUTES = 60 * 24; // 24h (change later)
+const CACHE_TTL_MINUTES = 60 * 24; // 24h for normal
+const CACHE_TTL_NO_SET_MINUTES = 60 * 24 * 7; // 7 days for "no_set" status
 
-function isFresh(fetchedAtIso: string) {
+function isFresh(fetchedAtIso: string, ttlMinutes?: number) {
   const t = new Date(fetchedAtIso).getTime();
   if (!isFinite(t)) return false;
-  return Date.now() - t < CACHE_TTL_MINUTES * 60_000;
+  const ttl = ttlMinutes ?? CACHE_TTL_MINUTES;
+  return Date.now() - t < ttl * 60_000;
+}
+
+function raBadgeUrls(badgeNameRaw: any) {
+  const badge = String(badgeNameRaw ?? "").trim();
+  if (!badge) return { unlocked: null as string | null, locked: null as string | null };
+
+  // Some data may already include _lock; normalize it away
+  const clean = badge.replace(/_lock$/i, "");
+
+  return {
+    unlocked: `https://media.retroachievements.org/Badge/${clean}.png`,
+    locked: `https://media.retroachievements.org/Badge/${clean}_lock.png`,
+  };
 }
 
 function normalizeEarned(a: any) {
@@ -58,6 +73,9 @@ export async function GET(req: Request) {
       ok: true,
       cached: false,
       fetched_at: null,
+      ra_game_id: null,
+      ra_status: "unmapped",
+      ra_num_achievements: 0,
       note: "No RetroAchievements mapping found for this release yet (release_external_ids.source='ra').",
       achievements: [],
     });
@@ -71,14 +89,19 @@ export async function GET(req: Request) {
     .eq("release_id", releaseId)
     .maybeSingle();
 
-  if (!force && cachedRow?.fetched_at && isFresh(cachedRow.fetched_at)) {
+  if (!force && cachedRow?.fetched_at) {
     const payload = cachedRow.payload ?? {};
-    return NextResponse.json({
-      ok: true,
-      cached: true,
-      fetched_at: cachedRow.fetched_at,
-      ...payload,
-    });
+    // Use longer TTL for "no_set" status (7 days vs 24 hours)
+    const ttlMinutes = payload.ra_status === "no_set" ? CACHE_TTL_NO_SET_MINUTES : CACHE_TTL_MINUTES;
+    
+    if (isFresh(cachedRow.fetched_at, ttlMinutes)) {
+      return NextResponse.json({
+        ok: true,
+        cached: true,
+        fetched_at: cachedRow.fetched_at,
+        ...payload,
+      });
+    }
   }
 
   // 3) Load user RA credentials
@@ -123,16 +146,23 @@ export async function GET(req: Request) {
   // ra.achievements is an object keyed by id (per docs)
   const achievementsObj = (ra as any)?.achievements ?? {};
   const rawAchievements = Object.values(achievementsObj);
+  const ra_num_achievements = rawAchievements.length;
+  const ra_status: "has_set" | "no_set" = ra_num_achievements > 0 ? "has_set" : "no_set";
+  
   const achievements = (rawAchievements || []).map((a: any) => {
     const { earned, earned_at } = normalizeEarned(a);
 
+    const badgeName = a?.badgeName ?? a?.BadgeName;
+    const { unlocked, locked } = raBadgeUrls(badgeName);
+    const icon = earned ? unlocked : locked;
+
     return {
-      achievement_id: String(a?.ID ?? a?.AchievementID ?? a?.id ?? ""),
-      achievement_name: a?.Title ?? a?.name ?? null,
-      achievement_description: a?.Description ?? a?.description ?? null,
-      gamerscore: a?.Points != null ? Number(a.Points) : null,
-      achievement_icon_url: a?.BadgeURL ?? a?.icon ?? null,
-      rarity_percentage: a?.Rarity != null ? Number(a.Rarity) : null,
+      achievement_id: String(a?.id ?? a?.ID ?? ""),
+      achievement_name: a?.title ?? a?.Title ?? null,
+      achievement_description: a?.description ?? a?.Description ?? null,
+      gamerscore: a?.points != null ? Number(a.points) : (a?.Points != null ? Number(a.Points) : null),
+      achievement_icon_url: icon,          // ✅ this is what you want
+      rarity_percentage: a?.trueRatio != null ? Number(a.trueRatio) : (a?.Rarity != null ? Number(a.Rarity) : null),
       earned,
       earned_at,
     };
@@ -150,6 +180,8 @@ export async function GET(req: Request) {
 
   const payload = {
     ra_game_id: raGameId,
+    ra_status,
+    ra_num_achievements,
     game: {
       id: (ra as any)?.id ?? null,
       title: (ra as any)?.title ?? null,

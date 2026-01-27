@@ -400,6 +400,77 @@ export default function ProfilePage() {
                   >
                     Run RA Sync
                   </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        let totalMapped = 0;
+                        let totalSkipped = 0;
+                        let totalProcessed = 0;
+                        let allErrors: Array<{ title: string; reason: string; details?: string }> = [];
+                        let cursor: string | null = null;
+                        let iteration = 0;
+
+                        // Auto-loop until done
+                        while (true) {
+                          iteration++;
+                          const url = cursor 
+                            ? `/api/ra/map?cursor=${encodeURIComponent(cursor)}`
+                            : "/api/ra/map";
+                          
+                          const res = await fetch(url, { method: "POST" });
+                          const text = await res.text();
+
+                          let json: any = null;
+                          try { json = text ? JSON.parse(text) : null; } catch {}
+
+                          if (!res.ok) {
+                            alert(`RA map failed (${res.status}): ${json?.error || text || "unknown"}`);
+                            return;
+                          }
+
+                          totalMapped += json?.mapped ?? 0;
+                          totalSkipped += json?.skipped ?? 0;
+                          totalProcessed += json?.processed ?? 0;
+                          if (Array.isArray(json?.errors)) {
+                            allErrors.push(...json.errors);
+                          }
+
+                          cursor = json?.next_cursor ?? null;
+
+                          // If no more items, we're done
+                          if (!cursor || !json?.has_more) {
+                            break;
+                          }
+
+                          // Small delay to avoid hammering the API
+                          await new Promise(resolve => setTimeout(resolve, 100));
+                        }
+
+                        // Show summary
+                        if (totalMapped === 0 && totalSkipped === totalProcessed && totalProcessed > 0) {
+                          alert("✅ All RetroAchievement-compatible releases are already mapped!");
+                        } else {
+                          const errorSummary = allErrors.length > 0 
+                            ? `\n\nErrors (${allErrors.length}): ${allErrors.slice(0, 5).map(e => `${e.title}: ${e.reason}`).join(", ")}${allErrors.length > 5 ? ` (+${allErrors.length - 5} more)` : ""}`
+                            : "";
+                          alert(`✅ RA map complete (${iteration} batch${iteration > 1 ? "es" : ""}):\n\nMapped: ${totalMapped}\nSkipped: ${totalSkipped}\nTotal processed: ${totalProcessed}${errorSummary}`);
+                        }
+                      } catch (e: any) {
+                        alert(`❌ Failed to fetch /api/ra/map: ${e?.message || e}`);
+                      }
+                    }}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Bulk Map RetroAchievements (optional)
+                  </button>
                 </div>
               </div>
             ) : (
