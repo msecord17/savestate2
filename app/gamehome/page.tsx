@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import ProgressBlock, { type ProgressSignal } from "@/components/progress/ProgressBlock";
+import { resolveCoverUrl } from "@/lib/images/resolveCoverUrl";
 
 type Card = {
   // game mode
@@ -91,6 +92,50 @@ function cardPlatformLabel(c: any) {
   );
 }
 
+function byLastSignalDesc(a: any, b: any) {
+  const ta = a?.lastSignalAt ? new Date(a.lastSignalAt).getTime() : 0;
+  const tb = b?.lastSignalAt ? new Date(b.lastSignalAt).getTime() : 0;
+  return tb - ta;
+}
+
+// Pick the "best" release from a game's releases array
+// Prefers: most recent signal > has cover > first one
+function bestRelease(releases: any[]): any | null {
+  if (!Array.isArray(releases) || releases.length === 0) return null;
+  
+  // Sort by: has signal (most recent first), then has cover, then first
+  const sorted = [...releases].sort((a, b) => {
+    const aTime = a?.lastSignalAt ? new Date(a.lastSignalAt).getTime() : 0;
+    const bTime = b?.lastSignalAt ? new Date(b.lastSignalAt).getTime() : 0;
+    if (bTime !== aTime) return bTime - aTime;
+    
+    const aHasCover = a?.cover_url ? 1 : 0;
+    const bHasCover = b?.cover_url ? 1 : 0;
+    return bHasCover - aHasCover;
+  });
+  
+  return sorted[0];
+}
+
+// Get platform-specific placeholder (matches resolveCoverUrl logic)
+function getPlatformPlaceholder(platformKey: string | null | undefined): string {
+  const key = (platformKey ?? "").toLowerCase();
+  
+  if (key.includes("steam")) return "/placeholders/platform/steam.png";
+  if (key.includes("psn") || key.includes("playstation")) return "/placeholders/platform/psn.png";
+  if (key.includes("xbox")) return "/placeholders/platform/xbox.png";
+  
+  if (key === "snes") return "/placeholders/platform/snes.png";
+  if (key === "nes") return "/placeholders/platform/nes.png";
+  if (key === "n64") return "/placeholders/platform/n64.png";
+  if (key === "gba") return "/placeholders/platform/gba.png";
+  if (key === "gb") return "/placeholders/platform/gb.png";
+  if (key === "gbc") return "/placeholders/platform/gbc.png";
+  if (key === "genesis" || key === "md") return "/placeholders/platform/genesis.png";
+  
+  return "/placeholders/platform/unknown.png";
+}
+
 export default function GameHomePage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -149,6 +194,32 @@ export default function GameHomePage() {
     for (const c of cards) set.add(String(c.status || "owned"));
     return ["all", ...Array.from(set).sort()];
   }, [cards]);
+
+  // Derive lanes (only for game mode, not release mode)
+  const continueCards = useMemo(() => {
+    if (splitByPlatform) return []; // Only show lanes in game mode
+    return [...cards]
+      .filter((c: any) => c.game_id && ((c?.steam_playtime_minutes ?? 0) > 0 || c?.lastSignalAt))
+      .sort(byLastSignalDesc)
+      .slice(0, 20);
+  }, [cards, splitByPlatform]);
+
+  const playingCards = useMemo(() => {
+    if (splitByPlatform) return []; // Only show lanes in game mode
+    return [...cards]
+      .filter((c: any) => c.game_id && String(c?.status ?? "").toLowerCase() === "playing")
+      .sort(byLastSignalDesc);
+  }, [cards, splitByPlatform]);
+
+  const continueIds = useMemo(() => new Set(continueCards.map((c: any) => c.game_id).filter(Boolean)), [continueCards]);
+  const playingIds = useMemo(() => new Set(playingCards.map((c: any) => c.game_id).filter(Boolean)), [playingCards]);
+
+  const allCards = useMemo(() => {
+    if (splitByPlatform) return []; // Only show lanes in game mode
+    return [...cards]
+      .filter((c: any) => c.game_id && !continueIds.has(c.game_id) && !playingIds.has(c.game_id))
+      .sort(byLastSignalDesc);
+  }, [cards, continueIds, playingIds, splitByPlatform]);
 
   const filtered = useMemo(() => {
     const now = Date.now();
@@ -333,6 +404,238 @@ export default function GameHomePage() {
               </div>
             </div>
 
+            {/* Lanes (only show in game mode) */}
+            {!splitByPlatform && continueCards.length > 0 && (
+              <section style={{ marginBottom: 32 }}>
+                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Continue</h2>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+                    gap: 16,
+                  }}
+                >
+                  {continueCards.map((card: any) => {
+                    const bestRel = bestRelease(card.releases ?? []);
+                    const releaseId = bestRel?.release_id ?? null;
+                    const platformKey = card?.platforms?.[0] ?? null;
+                    const cover = resolveCoverUrl({
+                      cover_url: card.cover_url,
+                      platform_key: platformKey,
+                    });
+                    const fallback = getPlatformPlaceholder(platformKey);
+                    if (!releaseId) return null;
+                    return (
+                      <Link key={card.game_id} href={`/releases/${releaseId}`} style={{ display: "block" }}>
+                        <div
+                          style={{
+                            borderRadius: 12,
+                            overflow: "hidden",
+                            background: "rgba(24, 24, 27, 0.4)",
+                            border: "1px solid rgba(39, 39, 42, 1)",
+                          }}
+                        >
+                          <img
+                            src={cover}
+                            alt={card.title}
+                            style={{
+                              width: "100%",
+                              aspectRatio: "16/9",
+                              objectFit: "cover",
+                            }}
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              if (img.src.endsWith(fallback)) return; // prevent infinite loop
+                              img.src = fallback;
+                            }}
+                          />
+                          <div style={{ padding: 12 }}>
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 500,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {card.title}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: "#a1a1aa",
+                                marginTop: 4,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {card.platforms?.join(" • ")}
+                            </div>
+                          </div>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {!splitByPlatform && playingCards.length > 0 && (
+              <section style={{ marginBottom: 32 }}>
+                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Now Playing</h2>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+                    gap: 16,
+                  }}
+                >
+                  {playingCards.map((card: any) => {
+                    const bestRel = bestRelease(card.releases ?? []);
+                    const releaseId = bestRel?.release_id ?? null;
+                    const platformKey = card?.platforms?.[0] ?? null;
+                    const cover = resolveCoverUrl({
+                      cover_url: card.cover_url,
+                      platform_key: platformKey,
+                    });
+                    const fallback = getPlatformPlaceholder(platformKey);
+                    if (!releaseId) return null;
+                    return (
+                      <Link key={card.game_id} href={`/releases/${releaseId}`} style={{ display: "block" }}>
+                        <div
+                          style={{
+                            borderRadius: 12,
+                            overflow: "hidden",
+                            background: "rgba(24, 24, 27, 0.4)",
+                            border: "1px solid rgba(39, 39, 42, 1)",
+                          }}
+                        >
+                          <img
+                            src={cover}
+                            alt={card.title}
+                            style={{
+                              width: "100%",
+                              aspectRatio: "16/9",
+                              objectFit: "cover",
+                            }}
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              if (img.src.endsWith(fallback)) return; // prevent infinite loop
+                              img.src = fallback;
+                            }}
+                          />
+                          <div style={{ padding: 12 }}>
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 500,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {card.title}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: "#a1a1aa",
+                                marginTop: 4,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {card.platforms?.join(" • ")}
+                            </div>
+                          </div>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {!splitByPlatform && (
+              <section style={{ marginBottom: 32 }}>
+                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>All Games</h2>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+                    gap: 16,
+                  }}
+                >
+                  {allCards.map((card: any) => {
+                    const bestRel = bestRelease(card.releases ?? []);
+                    const releaseId = bestRel?.release_id ?? null;
+                    const platformKey = card?.platforms?.[0] ?? null;
+                    const cover = resolveCoverUrl({
+                      cover_url: card.cover_url,
+                      platform_key: platformKey,
+                    });
+                    const fallback = getPlatformPlaceholder(platformKey);
+                    if (!releaseId) return null;
+                    return (
+                      <Link key={card.game_id} href={`/releases/${releaseId}`} style={{ display: "block" }}>
+                        <div
+                          style={{
+                            borderRadius: 12,
+                            overflow: "hidden",
+                            background: "rgba(24, 24, 27, 0.4)",
+                            border: "1px solid rgba(39, 39, 42, 1)",
+                          }}
+                        >
+                          <img
+                            src={cover}
+                            alt={card.title}
+                            style={{
+                              width: "100%",
+                              aspectRatio: "16/9",
+                              objectFit: "cover",
+                            }}
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              if (img.src.endsWith(fallback)) return; // prevent infinite loop
+                              img.src = fallback;
+                            }}
+                          />
+                          <div style={{ padding: 12 }}>
+                            <div
+                              style={{
+                                fontSize: 14,
+                                fontWeight: 500,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {card.title}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: "#a1a1aa",
+                                marginTop: 4,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {card.platforms?.join(" • ")}
+                            </div>
+                          </div>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
             <div
               style={{
                 display: "grid",
@@ -342,6 +645,14 @@ export default function GameHomePage() {
             >
               {filtered.map((c, idx) => {
                 const updated = timeAgo(c.lastSignalAt);
+                const platformKey = splitByPlatform
+                  ? (c.platform_key ?? null)
+                  : (Array.isArray(c.platforms) ? c.platforms[0] : null) ?? null;
+                const cover = resolveCoverUrl({
+                  cover_url: c.cover_url,
+                  platform_key: platformKey,
+                });
+                const fallback = getPlatformPlaceholder(platformKey);
 
                 const hasSteam = Number(c.steam_playtime_minutes || 0) > 0;
 
@@ -379,21 +690,49 @@ export default function GameHomePage() {
                         style={{
                           display: "block",
                           height: 140,
-                          background: c.cover_url
-                            ? `center / cover no-repeat url(${c.cover_url})`
-                            : "linear-gradient(135deg, #0f172a, #334155)",
+                          position: "relative",
+                          overflow: "hidden",
                           cursor: "pointer",
                         }}
-                      />
+                      >
+                        <img
+                          src={cover || fallback}
+                          alt={c.title}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "cover",
+                          }}
+                          onError={(e) => {
+                            const img = e.currentTarget;
+                            if (img.src.endsWith(fallback)) return; // prevent infinite loop
+                            img.src = fallback;
+                          }}
+                        />
+                      </Link>
                     ) : (
                       <div
                         style={{
                           height: 140,
-                          background: c.cover_url
-                            ? `center / cover no-repeat url(${c.cover_url})`
-                            : "linear-gradient(135deg, #0f172a, #334155)",
+                          position: "relative",
+                          overflow: "hidden",
                         }}
-                      />
+                      >
+                        <img
+                          src={cover || fallback}
+                          alt={c.title}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "cover",
+                          }}
+                          onError={(e) => {
+                            const img = e.currentTarget;
+                            if (img.src.endsWith(fallback)) return; // prevent infinite loop
+                            img.src = fallback;
+                          }}
+                        />
+                      </div>
                     )}
 
                     <div style={{ padding: 12 }}>

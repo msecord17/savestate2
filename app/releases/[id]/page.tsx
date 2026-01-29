@@ -22,6 +22,7 @@ type ReleaseDetail = {
     developer: string | null;
     publisher: string | null;
     first_release_year: number | null;
+    cover_url: string | null;
   } | null;
 };
 
@@ -751,9 +752,16 @@ export default function ReleaseDetailPage() {
                 height: 360,
                 borderRadius: 16,
                 border: "1px solid #e5e7eb",
-                background: release.cover_url
-                  ? `center / cover no-repeat url(${release.cover_url})`
-                  : "linear-gradient(135deg, #0f172a, #334155)",
+                background: (() => {
+                  const coverUrl = release.cover_url ?? release.games?.cover_url;
+                  const cover =
+                    coverUrl &&
+                    !coverUrl.includes("unknown.png") &&
+                    !coverUrl.includes("placeholder")
+                      ? coverUrl
+                      : "/images/placeholder-cover.png";
+                  return `center / cover no-repeat url(${cover})`;
+                })(),
                 marginBottom: 12,
               }}
               aria-label="Cover"
@@ -1263,6 +1271,18 @@ export default function ReleaseDetailPage() {
                     total: signals.psn.trophies_total ?? undefined,
                     playtimeMinutes: signals.psn.playtime_minutes ?? undefined,
                     lastUpdatedAt: signals.psn.last_updated_at ?? null,
+                  });
+                }
+
+                if (signals?.xbox) {
+                  progressSignals.push({
+                    source: "xbox",
+                    label: "Xbox",
+                    earned: signals.xbox.achievements_earned ?? undefined,
+                    total: signals.xbox.achievements_total ?? undefined,
+                    scoreEarned: signals.xbox.gamerscore_earned ?? undefined,
+                    scoreTotal: signals.xbox.gamerscore_total ?? undefined,
+                    lastUpdatedAt: signals.xbox.last_updated_at ?? null,
                   });
                 }
 

@@ -114,7 +114,7 @@ function platformChip(platform_key: string | null, platform_label: string | null
   return platform_key.toUpperCase();
 }
 
-function reduceToGameCards(releaseCards: ReleaseCard[]): GameCard[] {
+function reduceToGameCards(releaseCards: ReleaseCard[], gameCoversByGameId: Map<string, string | null>): GameCard[] {
   const byGame = new Map<string, ReleaseCard[]>();
 
   for (const r of releaseCards) {
@@ -130,7 +130,10 @@ function reduceToGameCards(releaseCards: ReleaseCard[]): GameCard[] {
     const titles = rels.map((x) => x.title).filter(Boolean);
     const title = titles.sort((a, b) => a.length - b.length)[0] ?? rels[0]?.title ?? "Untitled";
 
-    const cover_url = rels.find((x) => x.cover_url)?.cover_url ?? null;
+    // Fallback chain: release.cover_url -> game.cover_url -> null
+    const releaseCover = rels.find((x) => x.cover_url)?.cover_url ?? null;
+    const gameCover = gameCoversByGameId.get(game_id) ?? null;
+    const cover_url = releaseCover ?? gameCover ?? null;
     const status = bestStatus(rels.map((x) => x.status));
 
     const platforms = uniq(
@@ -242,7 +245,11 @@ export async function GET(req: Request) {
         platform_key,
         platform_name,
         platform_label,
-        cover_url
+        cover_url,
+        games:game_id (
+          id,
+          cover_url
+        )
       )
     `
     )
@@ -351,6 +358,12 @@ export async function GET(req: Request) {
       lastSignalAt = maxIso(lastSignalAt, raUpdated);
       if (steamMinutes > 0) lastSignalAt = maxIso(lastSignalAt, entryUpdated);
 
+      const gameCover = (rel as any)?.games?.cover_url ?? null;
+      
+      // Fallback chain: release.cover_url -> game.cover_url -> psn icon -> null
+      const releaseCover = rel.cover_url ?? null;
+      const cover_url = releaseCover ?? gameCover ?? psn?.title_icon_url ?? null;
+      
       return {
         release_id: rid,
         game_id: rel.game_id ?? null,
@@ -358,7 +371,7 @@ export async function GET(req: Request) {
         platform_key: rel.platform_key ?? null,
         platform_name: rel.platform_name ?? null,
         platform_label: rel.platform_label ?? null,
-        cover_url: rel.cover_url ?? psn?.title_icon_url ?? null,
+        cover_url,
 
         status: String(r?.status ?? "owned"),
         steam_playtime_minutes: steamMinutes,
@@ -388,6 +401,19 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, mode, total: releaseCards.length, cards: releaseCards });
   }
 
-  const gameCards = reduceToGameCards(releaseCards);
+  // Build map of game_id -> game.cover_url for fallback in reduceToGameCards
+  const gameCoversByGameId = new Map<string, string | null>();
+  for (const r of rows) {
+    const rel = r?.releases;
+    if (rel?.game_id && (rel as any)?.games?.cover_url) {
+      const gameId = String(rel.game_id);
+      const gameCover = (rel as any).games.cover_url;
+      if (!gameCoversByGameId.has(gameId)) {
+        gameCoversByGameId.set(gameId, gameCover);
+      }
+    }
+  }
+
+  const gameCards = reduceToGameCards(releaseCards, gameCoversByGameId);
   return NextResponse.json({ ok: true, mode, total: gameCards.length, cards: gameCards });
 }

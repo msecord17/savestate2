@@ -32,7 +32,8 @@ export async function GET() {
       games (
         first_release_year,
         developer,
-        genres
+        genres,
+        cover_url
       )
     )
   `)

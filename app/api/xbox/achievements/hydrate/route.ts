@@ -83,25 +83,55 @@ export async function POST(req: Request) {
 
     let upserted = 0;
 
+    const getId = (ach: any) =>
+      String(ach?.id ?? ach?.achievementId ?? ach?.achievement_id ?? "").trim();
+
+    const getUnlockIso = (ach: any): string | null => {
+      const raw =
+        ach?.unlockedDateTime ??
+        ach?.unlockTime ??
+        ach?.progression?.timeUnlocked ??
+        ach?.progression?.unlockedDateTime ??
+        null;
+      if (!raw) return null;
+      const t = new Date(String(raw)).getTime();
+      return isFinite(t) ? new Date(t).toISOString() : null;
+    };
+
+    const isEarned = (ach: any): boolean => {
+      const progressState = String(ach?.progressState ?? ach?.progress_state ?? "").toLowerCase();
+      const state = String(ach?.state ?? "").toLowerCase();
+
+      const unlocked =
+        Boolean(ach?.isUnlocked) ||
+        Boolean(ach?.unlocked) ||
+        Boolean(ach?.isAchieved) ||
+        progressState === "achieved" ||
+        progressState === "unlocked" ||
+        state === "unlocked";
+
+      if (getUnlockIso(ach)) return true;
+
+      const pct = Number(ach?.progressPercentage ?? ach?.progress_percentage ?? NaN);
+      if (isFinite(pct) && pct >= 100) return true;
+
+      const reqs = Array.isArray(ach?.progression?.requirements) ? ach.progression.requirements : [];
+      const completedReq = reqs.some((r: any) => {
+        const current = Number(r?.current ?? NaN);
+        const target = Number(r?.target ?? NaN);
+        return isFinite(current) && isFinite(target) && target > 0 && current >= target;
+      });
+
+      return unlocked || completedReq;
+    };
+
     // Upsert achievements into cache
     for (const ach of achievements) {
-      const achievementId = String(ach?.id ?? "").trim();
+      const achievementId = getId(ach);
       if (!achievementId) continue;
 
-      // Check multiple fields to determine if earned:
-      // 1. unlockedDateTime exists (strongest indicator)
-      // 2. progressState === "Achieved"
-      // 3. isUnlocked === true
-      // 4. state === "Unlocked"
-      // 5. progressPercentage === 100
-      const hasUnlockTime = !!ach?.unlockedDateTime;
-      const progressStateAchieved = ach?.progressState === "Achieved";
-      const isUnlocked = Boolean(ach?.isUnlocked);
-      const stateUnlocked = ach?.state === "Unlocked";
-      const progressComplete = ach?.progressPercentage === 100;
-      
-      const isEarned = hasUnlockTime || progressStateAchieved || isUnlocked || stateUnlocked || progressComplete;
-      const unlockTime = ach?.unlockedDateTime ? new Date(ach.unlockedDateTime).toISOString() : null;
+      const earned = isEarned(ach);
+      const unlockTime = getUnlockIso(ach);
 
       const row = {
         user_id: user.id,
@@ -115,7 +145,7 @@ export async function POST(req: Request) {
         achievement_icon_url: ach?.mediaAssets?.find((m: any) => m?.name === "Icon")?.url ?? null,
         rarity_percentage: ach?.rarity?.currentPercentage != null ? Number(ach.rarity.currentPercentage) : null,
 
-        earned: isEarned,
+        earned,
         earned_at: unlockTime,
 
         updated_at: nowIso(),

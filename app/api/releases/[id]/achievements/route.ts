@@ -16,7 +16,115 @@ function isFresh(iso: string | null) {
   return isFinite(t) && Date.now() - t < CACHE_TTL_MS;
 }
 
-export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+function getXboxAchievementId(ach: any): string {
+  // Different contract versions / shapes can use different keys
+  return String(
+    ach?.id ??
+      ach?.achievementId ??
+      ach?.achievement_id ??
+      ""
+  ).trim();
+}
+
+function getXboxAchievementUnlockTimeIso(ach: any): string | null {
+  const raw =
+    ach?.unlockedDateTime ??
+    ach?.unlockTime ??
+    ach?.progression?.timeUnlocked ??
+    ach?.progression?.unlockedDateTime ??
+    null;
+  if (!raw) return null;
+  const t = new Date(String(raw)).getTime();
+  return isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+function isXboxAchievementEarned(ach: any): boolean {
+  const progressState = String(ach?.progressState ?? ach?.progress_state ?? "").toLowerCase();
+  const state = String(ach?.state ?? "").toLowerCase();
+
+  const unlocked =
+    Boolean(ach?.isUnlocked) ||
+    Boolean(ach?.unlocked) ||
+    Boolean(ach?.isAchieved) ||
+    progressState === "achieved" ||
+    progressState === "unlocked" ||
+    state === "unlocked";
+
+  const unlockTime = getXboxAchievementUnlockTimeIso(ach);
+  if (unlockTime) return true;
+
+  const pct = Number(ach?.progressPercentage ?? ach?.progress_percentage ?? NaN);
+  if (isFinite(pct) && pct >= 100) return true;
+
+  // Some shapes expose requirements progress
+  const reqs = Array.isArray(ach?.progression?.requirements) ? ach.progression.requirements : [];
+  const completedReq = reqs.some((r: any) => {
+    const current = Number(r?.current ?? NaN);
+    const target = Number(r?.target ?? NaN);
+    return isFinite(current) && isFinite(target) && target > 0 && current >= target;
+  });
+
+  return unlocked || completedReq;
+}
+
+async function pickBestTitleId(opts: {
+  supabaseUser: any;
+  userId: string;
+  releaseId: string;
+  candidates: any[];
+}): Promise<string> {
+  const { supabaseUser, userId, releaseId, candidates } = opts;
+
+  // Prefer the title_id that has the most cached achievements (usually the base game vs DLC)
+  let best: { title_id: string; count: number; last_updated_at: string | null } | null = null;
+  const top = candidates.slice(0, 8);
+
+  for (const c of top) {
+    const tid = String(c?.title_id ?? "").trim();
+    if (!tid || isNaN(Number(tid))) continue;
+
+    const { count } = await supabaseUser
+      .from("xbox_achievements")
+      // head+count to avoid pulling rows
+      .select("achievement_id", { head: true, count: "exact" } as any)
+      .eq("user_id", userId)
+      .eq("release_id", releaseId)
+      .eq("title_id", tid);
+
+    const n = typeof count === "number" ? count : 0;
+    const last = c?.last_updated_at ? String(c.last_updated_at) : null;
+
+    if (!best || n > best.count) {
+      best = { title_id: tid, count: n, last_updated_at: last };
+    }
+  }
+
+  if (best && best.count > 0) return best.title_id;
+
+  // Fallback: prefer non-DLC-ish title names, then newest updated
+  const isDlcish = (name: string) => {
+    const s = (name || "").toLowerCase();
+    return s.includes("dlc") || s.includes("add-on") || s.includes("addon") || s.includes("expansion") || s.includes("season pass");
+  };
+
+  const newestNonDlc = top
+    .map((c) => ({
+      tid: String(c?.title_id ?? "").trim(),
+      name: String(c?.title_name ?? ""),
+      t: c?.last_updated_at ? new Date(c.last_updated_at).getTime() : 0,
+    }))
+    .filter((x) => x.tid && !isNaN(Number(x.tid)) && !isDlcish(x.name))
+    .sort((a, b) => b.t - a.t)[0];
+
+  const newestAny = top
+    .map((c) => ({ tid: String(c?.title_id ?? "").trim(), t: c?.last_updated_at ? new Date(c.last_updated_at).getTime() : 0 }))
+    .filter((x) => x.tid && !isNaN(Number(x.tid)))
+    .sort((a, b) => b.t - a.t)[0];
+
+  return newestNonDlc?.tid || newestAny?.tid || String(candidates[0]?.title_id ?? "").trim();
+}
+
+export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id: releaseId } = await ctx.params;
     if (!releaseId || releaseId === "undefined") {
@@ -40,11 +148,31 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     if (xboxErr) return NextResponse.json({ error: xboxErr.message }, { status: 500 });
     const rows = Array.isArray(xboxRows) ? xboxRows : [];
 
+    // Also consider releases.xbox_title_id as a candidate (often the "base" title id)
+    const { data: releaseRow } = await supabaseUser
+      .from("releases")
+      .select("xbox_title_id, display_title")
+      .eq("id", releaseId)
+      .maybeSingle();
+
     // Filter to only valid numeric title_ids (Xbox API requires numeric IDs)
     const withIds = rows.filter((r) => {
       const tid = String(r?.title_id ?? "").trim();
       return tid && !isNaN(Number(tid));
     });
+
+    const releaseTitleId = String((releaseRow as any)?.xbox_title_id ?? "").trim();
+    if (releaseTitleId && !isNaN(Number(releaseTitleId))) {
+      const exists = withIds.some((r) => String(r?.title_id ?? "").trim() === releaseTitleId);
+      if (!exists) {
+        withIds.unshift({
+          title_id: releaseTitleId,
+          title_name: String((releaseRow as any)?.display_title ?? "release.xbox_title_id"),
+          last_updated_at: null,
+          _source: "releases.xbox_title_id",
+        } as any);
+      }
+    }
     
     if (!withIds.length) {
       return NextResponse.json({ 
@@ -60,21 +188,30 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       }, { status: 404 });
     }
 
-    // Prefer newest updated
-    withIds.sort((a, b) => {
-      const aTime = a.last_updated_at ? new Date(a.last_updated_at).getTime() : 0;
-      const bTime = b.last_updated_at ? new Date(b.last_updated_at).getTime() : 0;
-      return bTime - aTime;
-    });
+    const url = new URL(req.url);
+    const requestedTitleId = String(url.searchParams.get("title_id") ?? "").trim();
 
-    const chosen = withIds[0];
-    const titleId = String(chosen.title_id).trim();
+    let titleId = "";
+    if (requestedTitleId && !isNaN(Number(requestedTitleId))) {
+      // Only allow selecting from mapped IDs for this release
+      const ok = withIds.some((r) => String(r?.title_id ?? "").trim() === requestedTitleId);
+      if (ok) titleId = requestedTitleId;
+    }
+
+    if (!titleId) {
+      titleId = await pickBestTitleId({
+        supabaseUser,
+        userId: user.id,
+        releaseId,
+        candidates: withIds,
+      });
+    }
     
     // Validate titleId is numeric before calling API
     if (!titleId || isNaN(Number(titleId))) {
       return NextResponse.json({ 
         error: `Invalid title_id format: "${titleId}". Expected numeric value.`,
-        debug: { chosen, allRows: rows }
+        debug: { titleId, allRows: rows }
       }, { status: 400 });
     }
 
@@ -111,6 +248,11 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
         .order("achievement_id", { ascending: true });
 
       if (!aErr && achievements) {
+        // Heuristic: if cache only contains earned achievements (common failure mode),
+        // bypass cache and refetch from API to recover full list.
+        const allEarned =
+          achievements.length > 0 && achievements.every((a: any) => Boolean(a?.earned));
+        if (!allEarned) {
         return NextResponse.json({
           ok: true,
           cached: true,
@@ -120,6 +262,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
           fetched_at: cached.updated_at,
           choices,
         });
+        }
       }
     }
 
@@ -177,31 +320,18 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     }
 
     for (const ach of achievements) {
-      const achievementId = String(ach?.id ?? "").trim();
+      const achievementId = getXboxAchievementId(ach);
       if (!achievementId) continue;
 
-      // Check multiple fields to determine if earned:
-      // 1. unlockedDateTime exists (strongest indicator)
-      // 2. progressState === "Achieved"
-      // 3. isUnlocked === true
-      // 4. state === "Unlocked"
-      // 5. progressPercentage === 100
-      const hasUnlockTime = !!ach?.unlockedDateTime;
-      const progressStateAchieved = ach?.progressState === "Achieved";
-      const isUnlocked = Boolean(ach?.isUnlocked);
-      const stateUnlocked = ach?.state === "Unlocked";
-      const progressComplete = ach?.progressPercentage === 100;
-      
-      const isEarned = hasUnlockTime || progressStateAchieved || isUnlocked || stateUnlocked || progressComplete;
-      
-      const unlockTime = ach?.unlockedDateTime ? new Date(ach.unlockedDateTime).toISOString() : null;
+      const isEarned = isXboxAchievementEarned(ach);
+      const unlockTime = getXboxAchievementUnlockTimeIso(ach);
       
       // Log if we detect an earned achievement for debugging
       if (isEarned && achievements.indexOf(ach) < 3) {
         console.log(`[Xbox Achievements] Earned achievement detected:`, {
           id: achievementId,
           name: ach?.name,
-          hasUnlockTime,
+          hasUnlockTime: Boolean(getXboxAchievementUnlockTimeIso(ach)),
           progressState: ach?.progressState,
           isUnlocked: ach?.isUnlocked,
           state: ach?.state,
@@ -230,22 +360,17 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
 
     // Format response
     const formatted = achievements.map((ach: any) => {
-      const hasUnlockTime = !!ach?.unlockedDateTime;
-      const progressStateAchieved = ach?.progressState === "Achieved";
-      const isUnlocked = Boolean(ach?.isUnlocked);
-      const stateUnlocked = ach?.state === "Unlocked";
-      const progressComplete = ach?.progressPercentage === 100;
-      const earned = hasUnlockTime || progressStateAchieved || isUnlocked || stateUnlocked || progressComplete;
+      const earned = isXboxAchievementEarned(ach);
       
       return {
-        achievement_id: String(ach?.id ?? ""),
+        achievement_id: getXboxAchievementId(ach),
         achievement_name: ach?.name ?? null,
         achievement_description: ach?.description ?? null,
         gamerscore: ach?.gamerscore != null ? Number(ach.gamerscore) : null,
         achievement_icon_url: ach?.mediaAssets?.find((m: any) => m?.name === "Icon")?.url ?? null,
         rarity_percentage: ach?.rarity?.currentPercentage != null ? Number(ach.rarity.currentPercentage) : null,
         earned,
-        earned_at: ach?.unlockedDateTime ? new Date(ach.unlockedDateTime).toISOString() : null,
+        earned_at: getXboxAchievementUnlockTimeIso(ach),
       };
     });
     
@@ -260,6 +385,11 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       earned: formatted.filter((a) => a.earned),
       fetched_at: new Date().toISOString(),
       choices,
+      debug_counts: {
+        total: formatted.length,
+        earned: formatted.filter((a) => a.earned).length,
+        unearned: formatted.filter((a) => !a.earned).length,
+      },
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed to load achievements" }, { status: 500 });

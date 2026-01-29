@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { igdbSearchBest } from "@/lib/igdb/server";
+import { cleanTitleForSearch } from "../catalog/backfill-covers/route";
 
 export async function POST(req: Request) {
   const supabaseAdmin = createClient(
@@ -27,13 +28,17 @@ export async function POST(req: Request) {
   let skipped = 0;
 
   for (const r of targets) {
-    const title = String(r.display_title || "").trim();
-    if (!title) {
+    const raw = String(r.display_title || "").trim();
+    if (!raw) {
       skipped++;
       continue;
     }
 
-    const hit = await igdbSearchBest(title);
+    // Try multiple search attempts with cleaned titles
+    const q1 = cleanTitleForSearch(raw);
+    const q2 = cleanTitleForSearch(raw.replace(/[:\-].*$/, "")); // drop subtitle if needed
+
+    const hit = (await igdbSearchBest(q1)) ?? (await igdbSearchBest(q2));
     if (!hit?.igdb_game_id) {
       skipped++;
       continue;

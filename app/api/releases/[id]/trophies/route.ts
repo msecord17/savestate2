@@ -44,7 +44,13 @@ export async function GET(
     }
 
     const npCommunicationId = String(psnRows.np_communication_id);
-    const trophyTitlePlatform = String(psnRows.title_platform ?? "PS5").trim() || "PS5";
+    const rawPlatform = String(psnRows.title_platform ?? "PS5");
+    const normPlatform = (() => {
+      const s = rawPlatform.toUpperCase();
+      if (s.includes("PS3")) return "PS3";
+      if (s.includes("PS4")) return "PS4";
+      return "PS5";
+    })();
 
     // Get NPSSO for authorization
     const { data: profile, error: pErr } = await supabase
@@ -60,12 +66,30 @@ export async function GET(
     const authorization = await psnAuthorizeFromNpsso(String(profile.psn_npsso));
     const accountId = String(profile?.psn_account_id ?? "me");
 
-    const { titleTrophies, earnedTrophies } = await psnGetTitleTrophyDetails(
-      authorization,
-      accountId,
-      npCommunicationId,
-      trophyTitlePlatform
-    );
+    // Retry PS5/PS4 if Sony returns "Resource not found"
+    const attempts: Array<"PS5" | "PS4" | "PS3"> =
+      normPlatform === "PS4" ? ["PS4", "PS5"] : normPlatform === "PS3" ? ["PS3"] : ["PS5", "PS4"];
+
+    let titleTrophies: any[] | null = null;
+    let earnedTrophies: any[] | null = null;
+    let lastErr: any = null;
+
+    for (const p of attempts) {
+      try {
+        const res = await psnGetTitleTrophyDetails(authorization, accountId, npCommunicationId, p);
+        titleTrophies = res.titleTrophies ?? null;
+        earnedTrophies = res.earnedTrophies ?? null;
+        lastErr = null;
+        break;
+      } catch (e: any) {
+        lastErr = e;
+        const msg = String(e?.message ?? "");
+        if (/resource not found/i.test(msg)) continue;
+        throw e;
+      }
+    }
+
+    if (lastErr && (!titleTrophies || !earnedTrophies)) throw lastErr;
 
     // Merge earned into trophy list by trophyId
     const earnedMap = new Map<number, any>();

@@ -16,6 +16,7 @@ type PortfolioRow = {
       first_release_year?: number | null;
       developer?: string | null;
       genres?: any | null;
+      cover_url?: string | null;
     } | null;
   } | null;
 };
@@ -183,17 +184,26 @@ export default function MyPortfolioPage() {
                     flexShrink: 0,
                   }}
                 >
-                  {rel?.cover_url && (
-                    <img
-                      src={rel.cover_url}
-                      alt={rel.display_title ?? "Cover"}
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                      }}
-                    />
-                  )}
+                  {(() => {
+                    const coverUrl = rel?.cover_url ?? rel?.games?.cover_url;
+                    const cover =
+                      coverUrl &&
+                      !coverUrl.includes("unknown.png") &&
+                      !coverUrl.includes("placeholder")
+                        ? coverUrl
+                        : "/images/placeholder-cover.png";
+                    return (
+                      <img
+                        src={cover}
+                        alt={rel.display_title ?? "Cover"}
+                        style={{
+                          width: "100%",
+                          height: "100%",
+                          objectFit: "cover",
+                        }}
+                      />
+                    );
+                  })()}
                 </div>
 
                 {/* INFO + CONTROLS */}

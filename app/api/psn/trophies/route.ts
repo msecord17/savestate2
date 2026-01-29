@@ -37,6 +37,14 @@ function pickHydratablePsnRow(rows: any[]) {
   return candidates[0];
 }
 
+function normalizePsnTrophyPlatform(raw: string | null | undefined): "PS5" | "PS4" | "PS3" {
+  const s = String(raw ?? "").toUpperCase();
+  // Some rows contain composite strings like "PS5/PS4" or "PS4 | PS5"
+  if (s.includes("PS3")) return "PS3";
+  if (s.includes("PS4")) return "PS4";
+  return "PS5";
+}
+
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -70,7 +78,7 @@ export async function GET(req: Request) {
     // Find PSN rows mapped to this release. There can be multiple (base + DLC).
     const { data: psnRows, error: psnErr } = await supabase
       .from("psn_title_progress")
-      .select("np_communication_id, title_name, title_platform, last_updated_at")
+      .select("np_communication_id, title_name, title_platform, last_updated_at, playtime_minutes, trophy_progress, trophies_earned, trophies_total")
       .eq("user_id", user.id)
       .eq("release_id", releaseId);
 
@@ -87,7 +95,8 @@ export async function GET(req: Request) {
     }
 
     const npCommunicationId = String(picked.np_communication_id || "").trim();
-    const trophyTitlePlatform = String(picked.title_platform || "PS5").trim();
+    // psn-api is picky about this param; normalize to supported values
+    const trophyTitlePlatform = normalizePsnTrophyPlatform(picked.title_platform);
 
     // If the id is synthetic, we can't hydrate trophy details from Sony.
     if (!npCommunicationId || npCommunicationId.startsWith("synthetic:")) {
@@ -112,12 +121,34 @@ export async function GET(req: Request) {
     // psn-api supports "me" for many endpoints. If this ever fails, we’ll add real accountId resolution.
     const accountId = String(profile?.psn_account_id ?? "me");
 
-    const { titleTrophies, earnedTrophies } = await psnGetTitleTrophyDetails(
-      authorization,
-      accountId,
-      npCommunicationId,
-      trophyTitlePlatform
-    );
+    // Some titles are only available on PS4 or PS5; retry if Sony returns "Resource not found"
+    const platformAttempts: Array<"PS5" | "PS4" | "PS3"> =
+      trophyTitlePlatform === "PS4" ? ["PS4", "PS5"] : trophyTitlePlatform === "PS3" ? ["PS3"] : ["PS5", "PS4"];
+
+    let titleTrophies: any[] | null = null;
+    let earnedTrophies: any[] | null = null;
+    let lastErr: any = null;
+
+    for (const p of platformAttempts) {
+      try {
+        const res = await psnGetTitleTrophyDetails(authorization, accountId, npCommunicationId, p);
+        titleTrophies = res.titleTrophies ?? null;
+        earnedTrophies = res.earnedTrophies ?? null;
+        lastErr = null;
+        break;
+      } catch (e: any) {
+        lastErr = e;
+        const msg = String(e?.message ?? "");
+        if (/resource not found/i.test(msg)) {
+          continue; // try next platform
+        }
+        throw e;
+      }
+    }
+
+    if (lastErr && (!titleTrophies || !earnedTrophies)) {
+      throw lastErr;
+    }
 
     // Merge earned into trophy list by trophyId
     const earnedById = new Map<number, any>();
@@ -140,7 +171,15 @@ export async function GET(req: Request) {
       };
     });
 
-    return NextResponse.json({ ok: true, trophies: merged });
+    return NextResponse.json({
+      ok: true,
+      trophies: merged,
+      // also return playtime/progress for convenient UI display
+      playtime_minutes: picked?.playtime_minutes != null ? Number(picked.playtime_minutes) : null,
+      trophy_progress: picked?.trophy_progress != null ? Number(picked.trophy_progress) : null,
+      trophies_earned: picked?.trophies_earned != null ? Number(picked.trophies_earned) : null,
+      trophies_total: picked?.trophies_total != null ? Number(picked.trophies_total) : null,
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed to fetch trophies" }, { status: 500 });
   }

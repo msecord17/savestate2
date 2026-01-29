@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { ensureRaMappingForRelease } from "@/lib/ra/mapReleaseToRA";
 
 export async function GET(
   _req: Request,
@@ -43,7 +44,8 @@ export async function GET(
           genres,
           developer,
           publisher,
-          first_release_year
+          first_release_year,
+          cover_url
         )
       `
       )
@@ -52,6 +54,28 @@ export async function GET(
 
     if (relErr) return NextResponse.json({ error: relErr.message }, { status: 500 });
     if (!release) return NextResponse.json({ error: "Release not found" }, { status: 404 });
+
+    // Auto-map RA if needed (only for RA-compatible platforms)
+    const raAutoMapAttemptedAt = new Date().toISOString();
+    let raAutoMap: any = null;
+
+    if (String(release.platform_key ?? "").toLowerCase() !== "") {
+      // only attempt for RA-compatible platforms
+      raAutoMap = await ensureRaMappingForRelease({
+        releaseId: id,
+        displayTitle: String(release.display_title ?? ""),
+        platformKey: release.platform_key,
+        supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        mapRelease: async ({ releaseId }) => {
+          // Call your existing route internally (simple + uses your proven logic)
+          const base = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
+          const r = await fetch(`${base}/api/ra/map-release?release_id=${encodeURIComponent(releaseId)}`, { cache: "no-store" });
+          const j = await r.json();
+          return { ok: Boolean(j?.ok), ra_game_id: j?.ra_game_id ? Number(j.ra_game_id) : null, note: j?.note };
+        },
+      });
+    }
 
     // 2) Portfolio status (optional but nice for Release page)
     const { data: portfolio } = await supabase
@@ -278,15 +302,27 @@ export async function GET(
       }
     }
 
+    const bestCover =
+      (release as any)?.cover_url ||
+      (release as any)?.games?.cover_url ||
+      null;
+
     return NextResponse.json({
       ok: true,
-      release,
+      release: {
+        ...(release as any),
+        cover_url: bestCover, // overwrite with fallback
+      },
       portfolio: portfolioData,
       signals: {
         steam: steam ?? null,
         psn: psn ?? null,
         xbox: xbox ?? null,
         ra: ra ?? null,
+      },
+      debug: {
+        raAutoMap,
+        raAutoMapAttemptedAt,
       },
     });
   } catch (e: any) {

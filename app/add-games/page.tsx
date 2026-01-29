@@ -166,13 +166,21 @@ export default function AddGamesPage() {
                   flexShrink: 0,
                 }}
               >
-                {r.cover_url ? (
-                  <img
-                    src={r.cover_url}
-                    alt={r.title}
-                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                  />
-                ) : null}
+                {(() => {
+                  const cover =
+                    r.cover_url &&
+                    !r.cover_url.includes("unknown.png") &&
+                    !r.cover_url.includes("placeholder")
+                      ? r.cover_url
+                      : "/images/placeholder-cover.png";
+                  return (
+                    <img
+                      src={cover}
+                      alt={r.title}
+                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    />
+                  );
+                })()}
               </div>
 
               <div style={{ flex: 1 }}>

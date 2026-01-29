@@ -7,6 +7,9 @@ export type ProgressSignal = {
   progressPct?: number;     // trophies / achievements %
   earned?: number;
   total?: number;
+  // Optional score fields (used for Xbox gamerscore)
+  scoreEarned?: number;
+  scoreTotal?: number;
   playtimeMinutes?: number;
   lastUpdatedAt?: string | null;
   ra_status?: "unmapped" | "no_set" | "has_set" | null;  // RA-specific status
@@ -112,7 +115,8 @@ export default function ProgressBlock({
             : null;
 
         // Skip rendering if no data to show
-        if (!playtime && signal.earned == null && pct == null) return null;
+        const hasScore = signal.scoreEarned != null || signal.scoreTotal != null;
+        if (!playtime && signal.earned == null && pct == null && !hasScore) return null;
 
         return (
           <div
@@ -147,6 +151,12 @@ export default function ProgressBlock({
               <div style={{ fontSize: 14, color: "#0f172a", marginTop: 2 }}>
                 {signal.source === "ra" ? "👾" : "🏆"} {signal.earned} / {signal.total}
                 {pct != null && ` (${pct}%)`}
+              </div>
+            )}
+
+            {signal.source === "xbox" && (signal.scoreEarned != null || signal.scoreTotal != null) && (
+              <div style={{ fontSize: 14, color: "#0f172a", marginTop: 2 }}>
+                ✖︎ {signal.scoreEarned ?? 0}/{signal.scoreTotal ?? "—"}
               </div>
             )}
 

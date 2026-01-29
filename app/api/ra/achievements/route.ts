@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { createClient } from "@supabase/supabase-js";
 import { raGetGameInfoAndUserProgress } from "@/lib/ra/server";
+import { mapReleaseToRA } from "@/lib/ra/map-release";
 
 const CACHE_TTL_MINUTES = 60 * 24; // 24h for normal
 const CACHE_TTL_NO_SET_MINUTES = 60 * 24 * 7; // 7 days for "no_set" status
@@ -58,7 +60,7 @@ export async function GET(req: Request) {
   if (!releaseId) return NextResponse.json({ error: "Missing release_id" }, { status: 400 });
 
   // 1) Find RA game id for this release via release_external_ids
-  const { data: ext, error: extErr } = await supabase
+  let { data: ext, error: extErr } = await supabase
     .from("release_external_ids")
     .select("external_id")
     .eq("release_id", releaseId)
@@ -66,19 +68,38 @@ export async function GET(req: Request) {
     .maybeSingle();
 
   if (extErr) return NextResponse.json({ error: extErr.message }, { status: 500 });
-  const raGameId = ext?.external_id ? Number(ext.external_id) : null;
 
-  if (!raGameId || !isFinite(raGameId)) {
-    return NextResponse.json({
-      ok: true,
-      cached: false,
-      fetched_at: null,
-      ra_game_id: null,
-      ra_status: "unmapped",
-      ra_num_achievements: 0,
-      note: "No RetroAchievements mapping found for this release yet (release_external_ids.source='ra').",
-      achievements: [],
+  let raGameId = ext?.external_id ? Number(ext.external_id) : null;
+
+  // ─────────────────────────────────────────────
+  // AUTO-MAP if missing
+  // ─────────────────────────────────────────────
+  if (!raGameId || !Number.isFinite(raGameId)) {
+    const supabaseAdmin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    );
+
+    // Try to map automatically - helper will load credentials from user_ra_connections
+    const mapped = await mapReleaseToRA(supabaseAdmin, releaseId, { 
+      dryRun: false,
+      userId: user.id,
     });
+
+    if (!mapped.ok || !mapped.ra_game_id) {
+      return NextResponse.json({
+        ok: true,
+        cached: false,
+        fetched_at: null,
+        ra_game_id: null,
+        ra_status: "unmapped",
+        ra_num_achievements: 0,
+        note: mapped.note || "No RetroAchievements mapping found (auto-map failed).",
+        achievements: [],
+      });
+    }
+
+    raGameId = mapped.ra_game_id;
   }
 
   // 2) Read cached row

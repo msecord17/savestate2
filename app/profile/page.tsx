@@ -405,9 +405,12 @@ export default function ProfilePage() {
                     onClick={async () => {
                       try {
                         let totalMapped = 0;
+                        let totalAlreadyMapped = 0;
                         let totalSkipped = 0;
-                        let totalProcessed = 0;
-                        let allErrors: Array<{ title: string; reason: string; details?: string }> = [];
+                        let totalScanned = 0;
+                        let totalCandidates = 0;
+                        let totalNoMatch = 0;
+                        let allErrors: Array<{ release_id: string; title: string; reason: string; details?: string }> = [];
                         let cursor: string | null = null;
                         let iteration = 0;
 
@@ -430,8 +433,11 @@ export default function ProfilePage() {
                           }
 
                           totalMapped += json?.mapped ?? 0;
+                          totalAlreadyMapped += json?.already_mapped ?? 0;
                           totalSkipped += json?.skipped ?? 0;
-                          totalProcessed += json?.processed ?? 0;
+                          totalScanned += json?.scanned ?? 0;
+                          totalCandidates += json?.candidates ?? 0;
+                          totalNoMatch += json?.no_match ?? 0;
                           if (Array.isArray(json?.errors)) {
                             allErrors.push(...json.errors);
                           }
@@ -448,13 +454,13 @@ export default function ProfilePage() {
                         }
 
                         // Show summary
-                        if (totalMapped === 0 && totalSkipped === totalProcessed && totalProcessed > 0) {
+                        if (totalMapped === 0 && totalAlreadyMapped > 0 && totalCandidates === totalAlreadyMapped) {
                           alert("✅ All RetroAchievement-compatible releases are already mapped!");
                         } else {
                           const errorSummary = allErrors.length > 0 
                             ? `\n\nErrors (${allErrors.length}): ${allErrors.slice(0, 5).map(e => `${e.title}: ${e.reason}`).join(", ")}${allErrors.length > 5 ? ` (+${allErrors.length - 5} more)` : ""}`
                             : "";
-                          alert(`✅ RA map complete (${iteration} batch${iteration > 1 ? "es" : ""}):\n\nMapped: ${totalMapped}\nSkipped: ${totalSkipped}\nTotal processed: ${totalProcessed}${errorSummary}`);
+                          alert(`✅ RA map complete (${iteration} batch${iteration > 1 ? "es" : ""}):\n\nScanned: ${totalScanned}\nCandidates: ${totalCandidates}\nNewly mapped: ${totalMapped}\nAlready mapped: ${totalAlreadyMapped}\nNo match: ${totalNoMatch}\nSkipped: ${totalSkipped}${errorSummary}`);
                         }
                       } catch (e: any) {
                         alert(`❌ Failed to fetch /api/ra/map: ${e?.message || e}`);
@@ -470,6 +476,84 @@ export default function ProfilePage() {
                     }}
                   >
                     Bulk Map RetroAchievements (optional)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        let cursor: string | null = null;
+                        let safety = 0;
+                        let totalMapped = 0;
+                        let totalAlreadyMapped = 0;
+                        let totalSkipped = 0;
+                        let totalScanned = 0;
+                        let totalCandidates = 0;
+                        let totalNoMatch = 0;
+                        let allErrors: Array<{ release_id: string; title: string; reason: string; details?: string }> = [];
+                        let totalPages = 0;
+
+                        while (safety < 50) {
+                          const url = cursor 
+                            ? `/api/ra/map?pages=10&cursor=${encodeURIComponent(cursor)}` 
+                            : `/api/ra/map?pages=10`;
+                          
+                          const res = await fetch(url, { method: "POST" });
+                          const text = await res.text();
+
+                          let json: any = null;
+                          try { json = text ? JSON.parse(text) : null; } catch {}
+
+                          if (!res.ok) {
+                            alert(`RA map failed (${res.status}): ${json?.error || text || "unknown"}`);
+                            return;
+                          }
+
+                          console.log("[RA MAP]", json);
+
+                          totalMapped += json?.mapped ?? 0;
+                          totalAlreadyMapped += json?.already_mapped ?? 0;
+                          totalSkipped += json?.skipped ?? 0;
+                          totalScanned += json?.scanned ?? 0;
+                          totalCandidates += json?.candidates ?? 0;
+                          totalNoMatch += json?.no_match ?? 0;
+                          totalPages += json?.pages_run ?? 0;
+                          if (Array.isArray(json?.errors)) {
+                            allErrors.push(...json.errors);
+                          }
+
+                          cursor = json?.next_cursor ?? null;
+                          if (!json?.has_more || !cursor) {
+                            break;
+                          }
+
+                          safety++;
+                          // Small delay to avoid hammering
+                          await new Promise(r => setTimeout(r, 250));
+                        }
+
+                        // Show summary
+                        if (totalMapped === 0 && totalAlreadyMapped > 0 && totalCandidates === totalAlreadyMapped) {
+                          alert("✅ All RetroAchievement-compatible releases are already mapped!");
+                        } else {
+                          const errorSummary = allErrors.length > 0 
+                            ? `\n\nErrors (${allErrors.length}): ${allErrors.slice(0, 5).map(e => `${e.title}: ${e.reason}`).join(", ")}${allErrors.length > 5 ? ` (+${allErrors.length - 5} more)` : ""}`
+                            : "";
+                          alert(`✅ RA map complete (${totalPages} pages):\n\nScanned: ${totalScanned}\nCandidates: ${totalCandidates}\nNewly mapped: ${totalMapped}\nAlready mapped: ${totalAlreadyMapped}\nNo match: ${totalNoMatch}\nSkipped: ${totalSkipped}${errorSummary}`);
+                        }
+                      } catch (e: any) {
+                        alert(`❌ Failed to map all RA titles: ${e?.message || e}`);
+                      }
+                    }}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: "1px solid #e5e7eb",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Map All RA Titles
                   </button>
                 </div>
               </div>
@@ -722,6 +806,79 @@ export default function ProfilePage() {
               }}
             >
               Auto-suggest statuses (PSN + Xbox)
+            </button>
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>Catalog</div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const limit = prompt("How many games to backfill? (default: 100)", "100");
+                  const limitNum = limit ? Math.min(Number(limit) || 100, 500) : 100;
+
+                  const res = await fetch(`/api/catalog/backfill-igdb-ids?limit=${limitNum}`, { method: "POST" });
+                  const text = await res.text();
+                  const data = text ? JSON.parse(text) : null;
+
+                  if (!res.ok) {
+                    alert(`Backfill failed (${res.status}): ${data?.error || text}`);
+                    return;
+                  }
+
+                  alert(
+                    `IGDB ID backfill done ✅\n\nProcessed: ${data.processed}\nUpdated IDs: ${data.updated_ids}\nUpdated covers (bonus): ${data.updated_covers}\nSkipped: ${data.skipped}\n\n${data.message || ""}`
+                  );
+                } catch (e: any) {
+                  alert(e?.message || "Backfill failed");
+                }
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                background: "white",
+                fontWeight: 900,
+                cursor: "pointer",
+                marginRight: 8,
+              }}
+            >
+              Backfill IGDB IDs (Games)
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const limit = prompt("How many games to backfill? (default: 100)", "100");
+                  const limitNum = limit ? Math.min(Number(limit) || 100, 500) : 100;
+                  
+                  const res = await fetch(`/api/catalog/backfill-covers?limit=${limitNum}`, { method: "POST" });
+                  const text = await res.text();
+                  const data = text ? JSON.parse(text) : null;
+
+                  if (!res.ok) {
+                    alert(`Backfill failed (${res.status}): ${data?.error || text}`);
+                    return;
+                  }
+
+                  alert(
+                    `Cover backfill done ✅\n\nProcessed: ${data.processed}\nUpdated: ${data.updated}\nSkipped: ${data.skipped}\n\n${data.message || ""}`
+                  );
+                } catch (e: any) {
+                  alert(e?.message || "Backfill failed");
+                }
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                background: "white",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              Backfill Game Covers (IGDB)
             </button>
           </div>
         </div>

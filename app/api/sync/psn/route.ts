@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { createClient } from "@supabase/supabase-js";
+import { igdbSearchBest } from "@/lib/igdb/server";
 
 import {
   getPsnAccessTokenFromNpsso,
@@ -68,6 +69,91 @@ function canonicalPlatformLabel(raw: string | null | undefined) {
 
   // default fallback
   return s;
+}
+
+// Split CamelCase / mashed titles (TigerWoodsPGATOUR07 → Tiger Woods PGA TOUR 07)
+function deMashTitle(s: string) {
+  return (s || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Za-z])(\d)/g, "$1 $2")
+    .replace(/(\d)([A-Za-z])/g, "$1 $2");
+}
+
+// Clean title for IGDB search (strip platform fluff / editions)
+function cleanTitleForIgdb(title: string) {
+  return deMashTitle(String(title || ""))
+    .replace(/™|®/g, "")
+    .replace(/\(.*?\)/g, " ")
+    .replace(/\[.*?\]/g, " ")
+    .replace(
+      /:\s*(standard|deluxe|gold|ultimate|complete|anniversary|remastered|definitive|edition).*/i,
+      ""
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function upsertGameIgdbFirst(admin: any, titleName: string) {
+  const raw = String(titleName || "").trim();
+  if (!raw) throw new Error("Cannot create game: titleName is empty after trim");
+
+  const cleaned = cleanTitleForIgdb(raw);
+  const hit = cleaned ? await igdbSearchBest(cleaned) : null;
+
+  // IGDB-first: use igdb_game_id as the real key when available
+  if (hit?.igdb_game_id) {
+    const canonical = String(hit.title || raw).trim() || raw;
+
+    const patch: any = {
+      igdb_game_id: Number(hit.igdb_game_id),
+      canonical_title: canonical,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Only include non-null-ish fields so we don't clobber existing data with nulls
+    if (hit.summary != null) patch.summary = hit.summary;
+    if (hit.developer != null) patch.developer = hit.developer;
+    if (hit.publisher != null) patch.publisher = hit.publisher;
+    if (hit.first_release_year != null) patch.first_release_year = hit.first_release_year;
+    if (Array.isArray(hit.genres) && hit.genres.length) patch.genres = hit.genres;
+    if (hit.cover_url) patch.cover_url = hit.cover_url;
+
+    // Your DB may not have a UNIQUE constraint on games.igdb_game_id yet.
+    // So we do "select first", then update/insert without relying on ON CONFLICT.
+    const { data: existingByIgdb, error: findErr } = await admin
+      .from("games")
+      .select("id")
+      .eq("igdb_game_id", Number(hit.igdb_game_id))
+      .maybeSingle();
+
+    if (findErr) throw new Error(`Failed to lookup game by igdb_game_id: ${findErr.message}`);
+
+    if (existingByIgdb?.id) {
+      const { error: updErr } = await admin.from("games").update(patch).eq("id", existingByIgdb.id);
+      if (updErr) throw new Error(`Failed to update game by igdb_game_id: ${updErr.message}`);
+      return { game_id: String(existingByIgdb.id), igdb_game_id: Number(hit.igdb_game_id) };
+    }
+
+    // Not found: fall back to canonical_title upsert (title is still NOT NULL)
+    const { data: gameRow, error: gErr } = await admin
+      .from("games")
+      .upsert(patch, { onConflict: "canonical_title" })
+      .select("id")
+      .single();
+
+    if (gErr || !gameRow?.id) throw new Error(`Failed to upsert game by canonical_title (igdb-first patch): ${gErr?.message || "unknown"}`);
+    return { game_id: String(gameRow.id), igdb_game_id: Number(hit.igdb_game_id) };
+  }
+
+  // Fallback: title-based upsert
+  const { data: gameRow, error: gErr } = await admin
+    .from("games")
+    .upsert({ canonical_title: raw }, { onConflict: "canonical_title" })
+    .select("id")
+    .single();
+
+  if (gErr || !gameRow?.id) throw new Error(`Failed to upsert game by canonical_title: ${gErr?.message || "unknown"}`);
+  return { game_id: String(gameRow.id), igdb_game_id: null };
 }
 
 /**
@@ -186,17 +272,8 @@ async function ensureReleaseForPsnTitle(opts: {
   if (mapErr) throw new Error(`release_external_ids lookup failed: ${mapErr.message}`);
   if (mapRow?.release_id) return String(mapRow.release_id);
 
-  // 2) Create game + release (fallback uses canonical_title unique)
-  const canonical = titleName.trim();
-
-  const { data: gameRow, error: gErr } = await admin
-    .from("games")
-    .upsert({ canonical_title: canonical }, { onConflict: "canonical_title" })
-    .select("id")
-    .single();
-
-  if (gErr || !gameRow?.id) throw new Error(`Failed to upsert game: ${gErr?.message || "unknown"}`);
-  const gameId = gameRow.id;
+  // 2) Create/attach game (IGDB-first, fallback to title)
+  const { game_id: gameId } = await upsertGameIgdbFirst(admin, titleName);
 
   // 3) Check if release already exists before inserting
   const { data: existingRelease, error: findErr } = await admin
@@ -237,25 +314,21 @@ async function ensureReleaseForPsnTitle(opts: {
   }
 
   // 4) Ensure mapping exists (idempotent)
-  const { data: existingMap } = await admin
+  const { error: mapUpErr } = await admin
     .from("release_external_ids")
-    .select("release_id")
-    .eq("source", "psn")
-    .eq("external_id", psnExternalId)
-    .maybeSingle();
+    .upsert(
+      {
+        release_id: releaseId,
+        source: "psn",
+        external_id: psnExternalId,
+        external_id_type: psnExternalId.startsWith("synthetic:") ? "synthetic" : "np_communication_id",
+      },
+      { onConflict: "source,external_id" }
+    );
 
-  if (!existingMap) {
-    const { error: insMapErr } = await admin.from("release_external_ids").insert({
-      release_id: releaseId,
-      source: "psn",
-      external_id: psnExternalId,
-      external_id_type: psnExternalId.startsWith("synthetic:") ? "synthetic" : "np_communication_id",
-    });
-
-    if (insMapErr) {
-      // Don't hard-fail on mapping insert (release is already created)
-      console.error(`Warning: Failed to insert release_external_ids: ${insMapErr.message}`);
-    }
+  if (mapUpErr) {
+    // Don't hard-fail on mapping upsert (release is already created)
+    console.error(`Warning: Failed to upsert release_external_ids: ${mapUpErr.message}`);
   }
 
   return releaseId;
