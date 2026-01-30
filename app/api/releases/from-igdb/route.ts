@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { upsertGameIgdbFirst } from "@/lib/igdb/server";
 import { supabaseServer } from "@/lib/supabase/server";
 
 function slugPlatformKey(input: string) {
@@ -80,38 +81,17 @@ export async function POST(req: Request) {
   const platformKeySource = platform_abbr || platform_name;
   const platform_key = slugPlatformKey(platformKeySource);
 
-  // 1) Ensure game row exists (simple select-then-insert to avoid ON CONFLICT constraints)
-  const canonical_title = title;
-
-  const { data: existingGame, error: gSelErr } = await supabaseServer
-    .from("games")
-    .select("id")
-    .eq("canonical_title", canonical_title)
-    .maybeSingle();
-
-  if (gSelErr) {
-    return NextResponse.json({ error: gSelErr.message }, { status: 500 });
+  // 1) Ensure game row exists (use shared resolver: IGDB-first + 23505 handling)
+  let game_id: string;
+  try {
+    const res = await upsertGameIgdbFirst(supabaseServer, title);
+    game_id = res.game_id;
+  } catch (e) {
+    return NextResponse.json({ error: (e as Error)?.message ?? "Game resolution failed" }, { status: 500 });
   }
 
-  let game_id = existingGame?.id as string | undefined;
-
-  if (!game_id) {
-    const { data: insertedGame, error: gInsErr } = await supabaseServer
-      .from("games")
-      .insert({
-        canonical_title,
-        genres: genres.length ? genres : null,
-        first_release_year: null,
-      })
-      .select("id")
-      .single();
-
-    if (gInsErr) return NextResponse.json({ error: gInsErr.message }, { status: 500 });
-    game_id = insertedGame.id as string;
-  }
-
-  // 2) Ensure release exists for (igdb_game_id, platform_key)
-  const { data: existingRelease, error: rSelErr } = await supabaseServer
+  // 2) Ensure release exists: check by (igdb_game_id, platform_key) then by (platform_key, game_id)
+  const { data: existingByIgdb, error: rSelErr } = await supabaseServer
     .from("releases")
     .select("id")
     .eq("igdb_game_id", igdb_game_id)
@@ -120,8 +100,35 @@ export async function POST(req: Request) {
 
   if (rSelErr) return NextResponse.json({ error: rSelErr.message }, { status: 500 });
 
-  if (existingRelease?.id) {
-    return NextResponse.json({ release_id: existingRelease.id, created: false });
+  if (existingByIgdb?.id) {
+    return NextResponse.json({ release_id: existingByIgdb.id, created: false });
+  }
+
+  const { data: existingByPlatformGame, error: r2Err } = await supabaseServer
+    .from("releases")
+    .select("id")
+    .eq("platform_key", platform_key)
+    .eq("game_id", game_id)
+    .maybeSingle();
+
+  if (!r2Err && existingByPlatformGame?.id) {
+    // Update existing release with igdb/metadata
+    const { error: updErr } = await supabaseServer
+      .from("releases")
+      .update({
+        display_title: title,
+        platform_name: platform_name || platform_abbr || "Unknown",
+        cover_provider: "igdb",
+        igdb_game_id: body.igdb_game_id,
+        cover_url: body.cover_url ?? null,
+        summary,
+        genres: genres.length ? genres : null,
+        developer,
+        publisher,
+      })
+      .eq("id", existingByPlatformGame.id);
+    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+    return NextResponse.json({ release_id: existingByPlatformGame.id, created: false });
   }
 
   const { data: insertedRelease, error: rInsErr } = await supabaseServer

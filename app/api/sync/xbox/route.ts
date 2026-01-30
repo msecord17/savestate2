@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { mergeReleaseInto } from "@/lib/merge-release-into";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 type XboxTitle = {
   name: string;
@@ -142,73 +145,120 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // Find existing release
-      let existingRelease: any = null;
+      // 1) Resolve platform external id = xboxTitleId
+      // 2) Find release_external_ids(source, external_id) → release_id
+      const { data: mapRow, error: mapErr } = await supabaseAdmin
+        .from("release_external_ids")
+        .select("release_id")
+        .eq("source", "xbox")
+        .eq("external_id", xboxTitleId)
+        .maybeSingle();
 
-      if (xboxTitleId) {
-        const { data } = await supabaseAdmin
-          .from("releases")
-          .select("id, game_id")
-          .eq("xbox_title_id", xboxTitleId)
-          .maybeSingle();
-        existingRelease = data ?? null;
+      if (mapErr) {
+        errors.push(`release_external_ids lookup: ${mapErr.message}`);
+        continue;
       }
 
-      if (!existingRelease) {
-        const { data } = await supabaseAdmin
+      let releaseId: string | null = mapRow?.release_id ? String(mapRow.release_id) : null;
+      let gameId: string | null = null;
+
+      if (releaseId) {
+        const { data: rel } = await supabaseAdmin
           .from("releases")
-          .select("id, game_id")
-          .eq("platform_key", slugPlatformKey())
-          .eq("display_title", title)
+          .select("game_id")
+          .eq("id", releaseId)
           .maybeSingle();
-        existingRelease = data ?? null;
-      }
-
-      let releaseId: string | null = existingRelease?.id ?? null;
-
-      // Create if missing
-      if (!releaseId) {
-        const { data: gameRow, error: gErr } = await supabaseAdmin
-          .from("games")
-          .upsert({ canonical_title: title }, { onConflict: "canonical_title" })
-          .select("id")
-          .single();
-
-        if (gErr || !gameRow?.id) {
-          const errMsg = `Failed to upsert game for ${title}: ${gErr?.message || "unknown"}`;
-          console.error(`[Xbox Sync] ${errMsg}`);
-          errors.push(errMsg);
-          continue; // Skip this title instead of failing the whole sync
-        }
-
-        const releaseInsert: any = {
-          game_id: gameRow.id,
-          display_title: title,
-          platform_name: "Xbox",
-          platform_key: slugPlatformKey(),
-          platform_label: "Xbox", // TODO: parse t.devices to detect Series X|S vs One vs 360
-          cover_url: null,
-        };
-        if (xboxTitleId) releaseInsert.xbox_title_id = xboxTitleId;
-
-        const { data: newRelease, error: rErr } = await supabaseAdmin
-          .from("releases")
-          .insert(releaseInsert)
-          .select("id")
-          .single();
-
-        if (rErr || !newRelease?.id) {
-          const errMsg = `Failed to insert release for ${title}: ${rErr?.message || "unknown"}`;
-          console.error(`[Xbox Sync] ${errMsg}`);
-          errors.push(errMsg);
-          continue; // Skip this title instead of failing the whole sync
-        }
-
-        releaseId = newRelease.id;
-        imported += 1;
-      } else {
+        gameId = rel?.game_id ?? null;
         updated += 1;
       }
+
+      // 3) If no release: (1) game_id (2) find by (platform_key, game_id) (3) insert with 23505 (4) upsert mapping; if mapped release_id differs, merge
+      if (!releaseId) {
+        try {
+          const { game_id: gid } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "xbox" });
+          gameId = gid;
+        } catch (e: any) {
+          errors.push(`game for ${title}: ${e?.message || "unknown"}`);
+          continue;
+        }
+
+        const { data: existingRelease, error: findErr } = await supabaseAdmin
+          .from("releases")
+          .select("id")
+          .eq("platform_key", slugPlatformKey())
+          .eq("game_id", gameId)
+          .maybeSingle();
+
+        if (findErr) {
+          errors.push(`release lookup: ${findErr.message}`);
+          continue;
+        }
+
+        if (existingRelease?.id) {
+          releaseId = String(existingRelease.id);
+        } else {
+          const { data: newRelease, error: rErr } = await supabaseAdmin
+            .from("releases")
+            .insert({
+              game_id: gameId,
+              display_title: title,
+              platform_name: "Xbox",
+              platform_key: slugPlatformKey(),
+              platform_label: "Xbox",
+              cover_url: null,
+              xbox_title_id: xboxTitleId,
+            })
+            .select("id")
+            .single();
+
+          if (rErr) {
+            const code = (rErr as { code?: string })?.code;
+            if (code === "23505") {
+              const { data: raced } = await supabaseAdmin
+                .from("releases")
+                .select("id")
+                .eq("platform_key", slugPlatformKey())
+                .eq("game_id", gameId)
+                .maybeSingle();
+              if (raced?.id) releaseId = String(raced.id);
+              else {
+                errors.push(`release 23505 but no row for ${title}`);
+                continue;
+              }
+            } else {
+              errors.push(`release insert ${title}: ${rErr?.message || "unknown"}`);
+              continue;
+            }
+          } else if (newRelease?.id) {
+            releaseId = String(newRelease.id);
+            imported += 1;
+          } else {
+            errors.push(`release insert ${title}: no id returned`);
+            continue;
+          }
+        }
+
+        await supabaseAdmin
+          .from("release_external_ids")
+          .upsert(releaseExternalIdRow(releaseId, "xbox", xboxTitleId), {
+            onConflict: "source,external_id",
+            ignoreDuplicates: true,
+          });
+
+        const { data: currentMap } = await supabaseAdmin
+          .from("release_external_ids")
+          .select("release_id")
+          .eq("source", "xbox")
+          .eq("external_id", xboxTitleId)
+          .maybeSingle();
+
+        if (currentMap?.release_id && String(currentMap.release_id) !== releaseId) {
+          await mergeReleaseInto(supabaseAdmin, String(currentMap.release_id), releaseId);
+          releaseId = String(currentMap.release_id);
+        }
+      }
+
+      if (!releaseId) continue;
 
       // Portfolio entry (don’t overwrite manual edits)
       const { data: existingEntry } = await supabaseUser

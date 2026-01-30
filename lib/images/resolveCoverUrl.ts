@@ -49,13 +49,8 @@ export type CoverInput = {
   }
 
   /**
-   * Cover ladder:
-   * 1) release.cover_url (canonical, if valid)
-   * 2) game.cover_url (fallback, if valid)
-   * 3) Steam header (if steam_appid)
-   * 4) PSN icon (if provided)
-   * 5) IGDB (if provided)
-   * 6) placeholder-cover.png
+   * Cover contract: default from games.cover_url; releases.cover_url is optional override.
+   * Ladder: 1) release.cover_url (if valid) 2) game.cover_url 3) Steam header 4) PSN icon 5) IGDB 6) placeholder
    */
   export function resolveCoverUrl(input: CoverInput): string {
     const cover = (input.cover_url ?? "").trim();

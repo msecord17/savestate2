@@ -1,6 +1,10 @@
+/**
+ * IGDB backfill focused on games: fills games.cover_url + metadata from IGDB,
+ * then propagates game cover to releases with null/unknown cover_url.
+ */
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { igdbSearchBest } from "@/lib/igdb/server";
+import { igdbSearchBest, normalizeCanonicalTitle } from "@/lib/igdb/server";
 
 function nowIso() {
   return new Date().toISOString();
@@ -173,14 +177,12 @@ export async function POST(req: Request) {
       updated_at: nowIso(),
     };
 
-    // Use IGDB title if it's better (different and valid)
+    // Use IGDB title if it's better (different and valid); always normalize for canonical_title
     const betterTitle = String(u.igdb_title || "").trim();
     if (betterTitle && betterTitle.length >= 2 && betterTitle.toLowerCase() !== raw.toLowerCase()) {
-      // Optional: only do this if you're comfortable "correcting" titles
-      patch.canonical_title = betterTitle;
+      patch.canonical_title = normalizeCanonicalTitle(betterTitle);
     } else {
-      // Fallback to original title
-      patch.canonical_title = raw;
+      patch.canonical_title = normalizeCanonicalTitle(raw);
     }
 
     const { error } = await supabaseAdmin

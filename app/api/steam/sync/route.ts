@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { createClient } from "@supabase/supabase-js";
+import { upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { mergeReleaseInto } from "@/lib/merge-release-into";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 function nowIso() {
   return new Date().toISOString();
@@ -120,53 +123,85 @@ export async function POST() {
 
     let releaseId = await findReleaseIdForApp(appid);
 
-    // If no mapping exists yet, create game + steam release + external id
+    // If no mapping exists yet: (1) game_id (2) find by (platform_key, game_id) (3) insert with 23505 (4) upsert mapping; if mapped release_id differs, merge
     if (!releaseId) {
-      // upsert game by canonical_title
-      const { data: gameRow, error: gErr } = await supabaseAdmin
-        .from("games")
-        .upsert({ canonical_title: name }, { onConflict: "canonical_title" })
-        .select("id")
-        .single();
-
-      if (gErr || !gameRow?.id) {
+      let gameId: string;
+      try {
+        const { game_id } = await upsertGameIgdbFirst(supabaseAdmin, name, { platform: "steam" });
+        gameId = game_id;
+      } catch {
         skipped += 1;
         continue;
       }
 
-      const gameId = gameRow.id;
-
-      const { data: newRelease, error: rErr } = await supabaseAdmin
+      const { data: existingRelease } = await supabaseAdmin
         .from("releases")
-        .insert({
-          game_id: gameId,
-          display_title: name,
-          platform_key: "steam",
-          platform_name: "Steam",
-          platform_label: "Steam",
-          cover_url: null,
-        })
         .select("id")
-        .single();
+        .eq("platform_key", "steam")
+        .eq("game_id", gameId)
+        .maybeSingle();
 
-      if (rErr || !newRelease?.id) {
-        skipped += 1;
-        continue;
+      if (existingRelease?.id) {
+        releaseId = String(existingRelease.id);
+      } else {
+        const { data: newRelease, error: rErr } = await supabaseAdmin
+          .from("releases")
+          .insert({
+            game_id: gameId,
+            display_title: name,
+            platform_key: "steam",
+            platform_name: "Steam",
+            platform_label: "Steam",
+            cover_url: null,
+          })
+          .select("id")
+          .single();
+
+        if (rErr) {
+          const code = (rErr as { code?: string })?.code;
+          if (code === "23505") {
+            const { data: raced } = await supabaseAdmin
+              .from("releases")
+              .select("id")
+              .eq("platform_key", "steam")
+              .eq("game_id", gameId)
+              .maybeSingle();
+            if (raced?.id) releaseId = String(raced.id);
+            else { skipped += 1; continue; }
+          } else {
+            skipped += 1;
+            continue;
+          }
+        } else if (newRelease?.id) {
+          releaseId = String(newRelease.id);
+          createdReleases += 1;
+        } else {
+          skipped += 1;
+          continue;
+        }
       }
 
-      releaseId = newRelease.id;
-      createdReleases += 1;
+      await supabaseAdmin
+        .from("release_external_ids")
+        .upsert(releaseExternalIdRow(releaseId, "steam", appid), {
+          onConflict: "source,external_id",
+          ignoreDuplicates: true,
+        });
+
+      const { data: currentMap } = await supabaseAdmin
+        .from("release_external_ids")
+        .select("release_id")
+        .eq("source", "steam")
+        .eq("external_id", appid)
+        .maybeSingle();
+
+      if (currentMap?.release_id && String(currentMap.release_id) !== releaseId) {
+        await mergeReleaseInto(supabaseAdmin, String(currentMap.release_id), releaseId);
+        releaseId = String(currentMap.release_id);
+      }
     } else {
       mapped += 1;
     }
-
-    // Ensure steam external ID mapping exists (idempotent) - for both new and existing releases
-    await supabaseAdmin
-      .from("release_external_ids")
-      .upsert(
-        { release_id: releaseId, source: "steam", external_id: appid },
-        { onConflict: "source,external_id" }
-      );
 
     // Upsert steam progress
     const { error: upErr } = await supabaseAdmin

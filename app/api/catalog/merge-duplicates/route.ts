@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 
 function normTitle(s: string) {
@@ -154,7 +155,7 @@ export async function POST(req: Request) {
           await supabaseAdmin
             .from("release_external_ids")
             .upsert(
-              { release_id: winner.id, source: x.source, external_id: x.external_id },
+              releaseExternalIdRow(winner.id, x.source, x.external_id),
               { onConflict: "release_id,source" }
             );
         }

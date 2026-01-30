@@ -1,5 +1,6 @@
 // lib/ra/map-release.ts
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 function resolveRaConsoleId(platformKeyRaw: string | null, platformNameRaw: string | null, platformLabelRaw: string | null) {
   const s = `${platformKeyRaw ?? ""} ${platformNameRaw ?? ""} ${platformLabelRaw ?? ""}`
@@ -280,11 +281,7 @@ export async function mapReleaseToRA(
   // 6) Write mapping
   if (!dryRun) {
     const { error: insErr } = await supabaseAdmin.from("release_external_ids").upsert(
-      {
-        release_id: releaseId,
-        source: "ra",
-        external_id: raGameId,
-      },
+      releaseExternalIdRow(releaseId, "ra", String(raGameId)),
       { onConflict: "release_id,source" }
     );
 

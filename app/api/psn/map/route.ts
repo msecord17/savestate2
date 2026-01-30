@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { createClient } from "@supabase/supabase-js";
 import { normalizePlatformLabel } from "@/lib/platforms";
-import { igdbSearchBest } from "@/lib/igdb/server";
+import { upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 function nowIso() {
   return new Date().toISOString();
@@ -19,72 +20,6 @@ function deMashTitle(s: string) {
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/([A-Za-z])(\d)/g, "$1 $2")
     .replace(/(\d)([A-Za-z])/g, "$1 $2");
-}
-
-function cleanTitleForIgdb(title: string) {
-  return deMashTitle(String(title || ""))
-    .replace(/™|®/g, "")
-    .replace(/\(.*?\)/g, " ")
-    .replace(/\[.*?\]/g, " ")
-    .replace(
-      /:\s*(standard|deluxe|gold|ultimate|complete|anniversary|remastered|definitive|edition).*/i,
-      ""
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function upsertGameIgdbFirst(admin: any, titleName: string) {
-  const raw = String(titleName || "").trim();
-  if (!raw) throw new Error("titleName empty");
-
-  const cleaned = cleanTitleForIgdb(raw);
-  const hit = cleaned ? await igdbSearchBest(cleaned) : null;
-
-  if (hit?.igdb_game_id) {
-    const canonical = String(hit.title || raw).trim() || raw;
-    const patch: any = {
-      igdb_game_id: Number(hit.igdb_game_id),
-      canonical_title: canonical,
-      updated_at: nowIso(),
-    };
-    if (hit.summary != null) patch.summary = hit.summary;
-    if (hit.developer != null) patch.developer = hit.developer;
-    if (hit.publisher != null) patch.publisher = hit.publisher;
-    if (hit.first_release_year != null) patch.first_release_year = hit.first_release_year;
-    if (Array.isArray(hit.genres) && hit.genres.length) patch.genres = hit.genres;
-    if (hit.cover_url) patch.cover_url = hit.cover_url;
-
-    const { data: existingByIgdb, error: findErr } = await admin
-      .from("games")
-      .select("id")
-      .eq("igdb_game_id", Number(hit.igdb_game_id))
-      .maybeSingle();
-
-    if (findErr) throw new Error(`game lookup (igdb_game_id) failed: ${findErr.message}`);
-
-    if (existingByIgdb?.id) {
-      const { error: updErr } = await admin.from("games").update(patch).eq("id", existingByIgdb.id);
-      if (updErr) throw new Error(`game update (igdb_game_id) failed: ${updErr.message}`);
-      return String(existingByIgdb.id);
-    }
-
-    const { data: gameRow, error: gErr } = await admin
-      .from("games")
-      .upsert(patch, { onConflict: "canonical_title" })
-      .select("id")
-      .single();
-    if (gErr || !gameRow?.id) throw new Error(`game upsert (canonical_title) failed: ${gErr?.message || "unknown"}`);
-    return String(gameRow.id);
-  }
-
-  const { data: gameRow, error: gErr } = await admin
-    .from("games")
-    .upsert({ canonical_title: raw }, { onConflict: "canonical_title" })
-    .select("id")
-    .single();
-  if (gErr || !gameRow?.id) throw new Error(`game upsert (canonical_title) failed: ${gErr?.message || "unknown"}`);
-  return String(gameRow.id);
 }
 
 export async function POST() {
@@ -214,85 +149,76 @@ export async function POST() {
       continue;
     }
 
-    // Create/find platform-specific release.
-    // If platformLabel is null, we create a PSN release with platform_label = null
-    // (and it won't conflict with your unique index because that index ignores null labels).
-    let existingRelease: any = null;
+    // One release per (platform_key, game_id): resolve game via IGDB, then find/create release
+    let gameId: string | null = null;
+    try {
+      const { game_id } = await upsertGameIgdbFirst(supabaseAdmin, titleName, { platform: "psn" });
+      gameId = game_id;
+    } catch {
+      skipped += 1;
+      continue;
+    }
 
-    if (platformLabel) {
-      const { data, error: findErr } = await supabaseAdmin
-        .from("releases")
-        .select("id, game_id")
-        .eq("platform_key", "psn")
-        .eq("display_title", titleName)
-        .eq("platform_label", platformLabel)
-        .maybeSingle();
-      if (findErr) {
-        skipped += 1;
-        continue;
-      }
-      existingRelease = data ?? null;
-    } else {
-      // fallback match: title-only PSN releases with null label
-      const { data, error: findErr } = await supabaseAdmin
-        .from("releases")
-        .select("id, game_id")
-        .eq("platform_key", "psn")
-        .eq("display_title", titleName)
-        .is("platform_label", null)
-        .maybeSingle();
-      if (findErr) {
-        skipped += 1;
-        continue;
-      }
-      existingRelease = data ?? null;
+    const { data: existingRelease, error: findErr } = await supabaseAdmin
+      .from("releases")
+      .select("id")
+      .eq("platform_key", "psn")
+      .eq("game_id", gameId)
+      .maybeSingle();
+
+    if (findErr) {
+      skipped += 1;
+      continue;
     }
 
     let releaseId: string | null = existingRelease?.id ?? null;
-    let gameId: string | null = existingRelease?.game_id ?? null;
 
     if (!releaseId) {
-      try {
-        gameId = await upsertGameIgdbFirst(supabaseAdmin, titleName);
-      } catch {
-        skipped += 1;
-        continue;
-      }
-
-      const { data: newRelease, error: rErr } = await supabaseAdmin
+      // DB may have releases_platform_title_label_unique; find by title+label and reuse
+      const titleQ = supabaseAdmin
         .from("releases")
-        .insert({
-          game_id: gameId,
-          display_title: titleName,
-          platform_key: "psn",
-          platform_name: "PlayStation",
-          platform_label: platformLabel, // can be null (unknown)
-          cover_url: null,
-        })
         .select("id")
-        .single();
+        .eq("platform_key", "psn")
+        .eq("display_title", titleName);
+      const { data: existingByTitle } =
+        platformLabel != null && platformLabel !== ""
+          ? await titleQ.eq("platform_label", platformLabel).maybeSingle()
+          : await titleQ.is("platform_label", null).maybeSingle();
 
-      if (rErr || !newRelease?.id) {
-        skipped += 1;
-        continue;
+      if (existingByTitle?.id) {
+        releaseId = existingByTitle.id;
+        await supabaseAdmin
+          .from("releases")
+          .update({ game_id: gameId, updated_at: nowIso() })
+          .eq("id", releaseId);
+      } else {
+        const { data: newRelease, error: rErr } = await supabaseAdmin
+          .from("releases")
+          .insert({
+            game_id: gameId,
+            display_title: titleName,
+            platform_key: "psn",
+            platform_name: "PlayStation",
+            platform_label: platformLabel,
+            cover_url: null,
+          })
+          .select("id")
+          .single();
+
+        if (rErr || !newRelease?.id) {
+          skipped += 1;
+          continue;
+        }
+
+        releaseId = newRelease.id;
+        created += 1;
       }
-
-      releaseId = newRelease.id;
-      created += 1;
     }
 
     // ✅ After creating/finding release, upsert the external-id mapping (idempotent)
     await supabaseAdmin
       .from("release_external_ids")
-      .upsert(
-        {
-          release_id: releaseId,
-          source: "psn",
-          external_id: npid,
-          external_id_type: npid.startsWith("synthetic:") ? "synthetic" : "np_communication_id",
-        },
-        { onConflict: "source,external_id" }
-      );
+      .upsert(releaseExternalIdRow(releaseId, "psn", npid), { onConflict: "source,external_id" });
 
     const { error: mapErr } = await supabaseUser
       .from("psn_title_progress")

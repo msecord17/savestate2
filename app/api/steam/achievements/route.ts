@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 
 const CACHE_TTL_MINUTES = 60 * 24; // 24h
@@ -44,13 +45,7 @@ async function ensureSteamMapping(
   const { error } = await supabase
     .from("release_external_ids")
     .upsert(
-      {
-        release_id: releaseId,
-        source: "steam",
-        external_id: clean,
-      },
-      // IMPORTANT: your table likely has a unique constraint on (release_id, source)
-      // If yours is different, change this to match your constraint.
+      releaseExternalIdRow(releaseId, "steam", clean),
       { onConflict: "release_id,source" }
     );
 

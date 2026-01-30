@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { createClient } from "@supabase/supabase-js";
-import { igdbSearchBest } from "@/lib/igdb/server";
+import { igdbSearchBest, normalizeCanonicalTitle, upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { mergeReleaseInto } from "@/lib/merge-release-into";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 import {
   getPsnAccessTokenFromNpsso,
@@ -77,83 +79,6 @@ function deMashTitle(s: string) {
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/([A-Za-z])(\d)/g, "$1 $2")
     .replace(/(\d)([A-Za-z])/g, "$1 $2");
-}
-
-// Clean title for IGDB search (strip platform fluff / editions)
-function cleanTitleForIgdb(title: string) {
-  return deMashTitle(String(title || ""))
-    .replace(/™|®/g, "")
-    .replace(/\(.*?\)/g, " ")
-    .replace(/\[.*?\]/g, " ")
-    .replace(
-      /:\s*(standard|deluxe|gold|ultimate|complete|anniversary|remastered|definitive|edition).*/i,
-      ""
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function upsertGameIgdbFirst(admin: any, titleName: string) {
-  const raw = String(titleName || "").trim();
-  if (!raw) throw new Error("Cannot create game: titleName is empty after trim");
-
-  const cleaned = cleanTitleForIgdb(raw);
-  const hit = cleaned ? await igdbSearchBest(cleaned) : null;
-
-  // IGDB-first: use igdb_game_id as the real key when available
-  if (hit?.igdb_game_id) {
-    const canonical = String(hit.title || raw).trim() || raw;
-
-    const patch: any = {
-      igdb_game_id: Number(hit.igdb_game_id),
-      canonical_title: canonical,
-      updated_at: new Date().toISOString(),
-    };
-
-    // Only include non-null-ish fields so we don't clobber existing data with nulls
-    if (hit.summary != null) patch.summary = hit.summary;
-    if (hit.developer != null) patch.developer = hit.developer;
-    if (hit.publisher != null) patch.publisher = hit.publisher;
-    if (hit.first_release_year != null) patch.first_release_year = hit.first_release_year;
-    if (Array.isArray(hit.genres) && hit.genres.length) patch.genres = hit.genres;
-    if (hit.cover_url) patch.cover_url = hit.cover_url;
-
-    // Your DB may not have a UNIQUE constraint on games.igdb_game_id yet.
-    // So we do "select first", then update/insert without relying on ON CONFLICT.
-    const { data: existingByIgdb, error: findErr } = await admin
-      .from("games")
-      .select("id")
-      .eq("igdb_game_id", Number(hit.igdb_game_id))
-      .maybeSingle();
-
-    if (findErr) throw new Error(`Failed to lookup game by igdb_game_id: ${findErr.message}`);
-
-    if (existingByIgdb?.id) {
-      const { error: updErr } = await admin.from("games").update(patch).eq("id", existingByIgdb.id);
-      if (updErr) throw new Error(`Failed to update game by igdb_game_id: ${updErr.message}`);
-      return { game_id: String(existingByIgdb.id), igdb_game_id: Number(hit.igdb_game_id) };
-    }
-
-    // Not found: fall back to canonical_title upsert (title is still NOT NULL)
-    const { data: gameRow, error: gErr } = await admin
-      .from("games")
-      .upsert(patch, { onConflict: "canonical_title" })
-      .select("id")
-      .single();
-
-    if (gErr || !gameRow?.id) throw new Error(`Failed to upsert game by canonical_title (igdb-first patch): ${gErr?.message || "unknown"}`);
-    return { game_id: String(gameRow.id), igdb_game_id: Number(hit.igdb_game_id) };
-  }
-
-  // Fallback: title-based upsert
-  const { data: gameRow, error: gErr } = await admin
-    .from("games")
-    .upsert({ canonical_title: raw }, { onConflict: "canonical_title" })
-    .select("id")
-    .single();
-
-  if (gErr || !gameRow?.id) throw new Error(`Failed to upsert game by canonical_title: ${gErr?.message || "unknown"}`);
-  return { game_id: String(gameRow.id), igdb_game_id: null };
 }
 
 /**
@@ -250,8 +175,9 @@ async function mergeUpsertPsnTitle(
 }
 
 /**
- * Ensure a releases row exists for this PSN title, using release_external_ids.
- * Returns release_id.
+ * Ensure a releases row exists for this PSN title, anchored on release_external_ids(source='psn', external_id).
+ * (0) Lookup mapping first and return if exists; (1) resolve game_id; (2) find by (platform_key, game_id);
+ * (3) insert with 23505 race handling; (4) upsert mapping (ignoreDuplicates); if mapped release_id differs, merge and use mapped.
  */
 async function ensureReleaseForPsnTitle(opts: {
   admin: any;
@@ -261,7 +187,7 @@ async function ensureReleaseForPsnTitle(opts: {
 }) {
   const { admin, titleName, psnExternalId, platformLabel } = opts;
 
-  // 1) Look up by external id
+  // (0) Anchor: lookup release_external_ids(source='psn', external_id) and return if exists
   const { data: mapRow, error: mapErr } = await admin
     .from("release_external_ids")
     .select("release_id")
@@ -272,27 +198,25 @@ async function ensureReleaseForPsnTitle(opts: {
   if (mapErr) throw new Error(`release_external_ids lookup failed: ${mapErr.message}`);
   if (mapRow?.release_id) return String(mapRow.release_id);
 
-  // 2) Create/attach game (IGDB-first, fallback to title)
-  const { game_id: gameId } = await upsertGameIgdbFirst(admin, titleName);
+  // (1) Resolve game_id via IGDB-first
+  const { game_id: gameId } = await upsertGameIgdbFirst(admin, titleName, { platform: "psn" });
 
-  // 3) Check if release already exists before inserting
-  const { data: existingRelease, error: findErr } = await admin
+  // (2) Find release by (platform_key='psn', game_id)
+  const { data: existingByGame, error: findErr } = await admin
     .from("releases")
     .select("id")
     .eq("platform_key", "psn")
-    .eq("display_title", titleName.trim())
-    .eq("platform_label", platformLabel)
+    .eq("game_id", gameId)
     .maybeSingle();
 
   if (findErr) throw new Error(`Failed to check existing release: ${findErr.message}`);
 
   let releaseId: string;
 
-  if (existingRelease?.id) {
-    // Release already exists, just use it
-    releaseId = String(existingRelease.id);
+  if (existingByGame?.id) {
+    releaseId = String(existingByGame.id);
   } else {
-    // Insert new release (platform_key = psn, platform_label = PS5/PS4 etc)
+    // (3) Insert release with 23505 race handling
     const releaseInsert: any = {
       game_id: gameId,
       display_title: titleName.trim(),
@@ -308,27 +232,54 @@ async function ensureReleaseForPsnTitle(opts: {
       .select("id")
       .single();
 
-    if (rErr || !releaseRow?.id) throw new Error(`Failed to insert release: ${rErr?.message || "unknown"}`);
-
-    releaseId = String(releaseRow.id);
+    if (rErr) {
+      const code = (rErr as { code?: string })?.code;
+      if (code === "23505") {
+        // Unique violation on (platform_key, game_id): another insert won the race
+        const { data: raced, error: raceErr } = await admin
+          .from("releases")
+          .select("id")
+          .eq("platform_key", "psn")
+          .eq("game_id", gameId)
+          .maybeSingle();
+        if (raceErr || !raced?.id) throw new Error(`release race lookup failed: ${raceErr?.message || "no row"}`);
+        releaseId = String(raced.id);
+      } else {
+        throw new Error(`Failed to insert release: ${rErr.message}`);
+      }
+    } else if (releaseRow?.id) {
+      releaseId = String(releaseRow.id);
+    } else {
+      throw new Error("Failed to insert release: no id returned");
+    }
   }
 
-  // 4) Ensure mapping exists (idempotent)
+  // (4) Upsert release_external_ids; do not overwrite existing mapping (ignoreDuplicates)
   const { error: mapUpErr } = await admin
     .from("release_external_ids")
-    .upsert(
-      {
-        release_id: releaseId,
-        source: "psn",
-        external_id: psnExternalId,
-        external_id_type: psnExternalId.startsWith("synthetic:") ? "synthetic" : "np_communication_id",
-      },
-      { onConflict: "source,external_id" }
-    );
+    .upsert(releaseExternalIdRow(releaseId, "psn", psnExternalId), {
+      onConflict: "source,external_id",
+      ignoreDuplicates: true,
+    });
 
   if (mapUpErr) {
-    // Don't hard-fail on mapping upsert (release is already created)
     console.error(`Warning: Failed to upsert release_external_ids: ${mapUpErr.message}`);
+  }
+
+  // If mapping already existed with a different release_id, merge our release into the anchored one
+  const { data: currentMap, error: selErr } = await admin
+    .from("release_external_ids")
+    .select("release_id")
+    .eq("source", "psn")
+    .eq("external_id", psnExternalId)
+    .maybeSingle();
+
+  if (!selErr && currentMap?.release_id) {
+    const anchoredId = String(currentMap.release_id);
+    if (anchoredId !== releaseId) {
+      await mergeReleaseInto(admin, anchoredId, releaseId);
+      return anchoredId;
+    }
   }
 
   return releaseId;

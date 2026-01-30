@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
-import { igdbSearchBest } from "@/lib/igdb/server";
+import { igdbSearchBest, upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 // If you already use another key format, keep consistent with your other platforms:
 function slugPlatformKey() {
@@ -66,86 +67,95 @@ export async function POST() {
       let releaseId: string | null = r.release_id ?? null;
 
       if (!releaseId) {
-        // Find existing release by xbox title id (prefer pf_title_id if you have it)
         const key = pfTitleId || titleId;
 
+        // 1) Resolve release by external ID mapping first
         if (key) {
+          const { data: mapRow } = await supabaseAdmin
+            .from("release_external_ids")
+            .select("release_id")
+            .eq("source", "xbox")
+            .eq("external_id", key)
+            .maybeSingle();
+          if (mapRow?.release_id) releaseId = String(mapRow.release_id);
+        }
+
+        // 2) Fallback: find existing release by xbox_title_id on releases
+        if (!releaseId && key) {
           const { data: existingRelease } = await supabaseAdmin
             .from("releases")
             .select("id, game_id, cover_url")
             .eq("xbox_title_id", key)
             .maybeSingle();
-
           if (existingRelease?.id) releaseId = existingRelease.id;
         }
 
-        // If still missing, create game + release
+        // 3) If still missing, create game (resolver) then find/create release by (platform_key, game_id)
         if (!releaseId) {
-          // 1) Create/lookup game by canonical_title
-          // (If you have unique constraints on canonical_title, we handle conflict by selecting existing.)
-          let gameId: string | null = null;
-
-          // Try find by canonical_title first
-          const { data: maybeGame } = await supabaseAdmin
-            .from("games")
-            .select("id, igdb_game_id, summary, genres, developer, publisher, first_release_year")
-            .eq("canonical_title", title)
-            .maybeSingle();
-
-          if (maybeGame?.id) {
-            gameId = maybeGame.id;
-          } else {
-            const { data: newGame, error: gErr } = await supabaseAdmin
-              .from("games")
-              .insert({ canonical_title: title })
-              .select("id")
-              .single();
-
-            if (gErr || !newGame?.id) {
-              // canonical_title unique constraint edge-case: race condition
-              const { data: retryGame } = await supabaseAdmin
-                .from("games")
-                .select("id")
-                .eq("canonical_title", title)
-                .maybeSingle();
-
-              if (!retryGame?.id) {
-                return NextResponse.json(
-                  { error: `Failed to insert/find game for ${title}: ${gErr?.message || "unknown"}` },
-                  { status: 500 }
-                );
-              }
-              gameId = retryGame.id;
-            } else {
-              gameId = newGame.id;
-            }
-          }
-
-          // 2) Create release
-          const xboxKey = pfTitleId || titleId || null;
-
-          const { data: newRelease, error: rErr } = await supabaseAdmin
-            .from("releases")
-            .insert({
-              game_id: gameId,
-              display_title: title,
-              platform_name: "Xbox",
-              platform_key: slugPlatformKey(),
-              xbox_title_id: xboxKey,
-              cover_url: xboxFallbackCover(xboxKey),
-            })
-            .select("id, cover_url")
-            .single();
-
-          if (rErr || !newRelease?.id) {
+          let gameId: string;
+          try {
+            const { game_id } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "xbox" });
+            gameId = game_id;
+          } catch (e) {
             return NextResponse.json(
-              { error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` },
+              { error: `Failed to create/find game for ${title}: ${(e as Error)?.message || "unknown"}` },
               { status: 500 }
             );
           }
 
-          releaseId = newRelease.id;
-          imported += 1;
+          const xboxKey = pfTitleId || titleId || null;
+
+          // Check if release already exists for (platform_key, game_id)
+          const { data: existingByPlatformGame } = await supabaseAdmin
+            .from("releases")
+            .select("id")
+            .eq("platform_key", slugPlatformKey())
+            .eq("game_id", gameId)
+            .maybeSingle();
+
+          if (existingByPlatformGame?.id) {
+            releaseId = existingByPlatformGame.id;
+            if (xboxKey) {
+              await supabaseAdmin
+                .from("releases")
+                .update({
+                  xbox_title_id: xboxKey,
+                  display_title: title,
+                  cover_url: xboxFallbackCover(xboxKey),
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", releaseId);
+            }
+          } else {
+            const { data: newRelease, error: rErr } = await supabaseAdmin
+              .from("releases")
+              .insert({
+                game_id: gameId,
+                display_title: title,
+                platform_name: "Xbox",
+                platform_key: slugPlatformKey(),
+                xbox_title_id: xboxKey,
+                cover_url: xboxFallbackCover(xboxKey),
+              })
+              .select("id, cover_url")
+              .single();
+
+            if (rErr || !newRelease?.id) {
+              return NextResponse.json(
+                { error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` },
+                { status: 500 }
+              );
+            }
+            releaseId = newRelease.id;
+            imported += 1;
+          }
+
+          // Write release_external_ids so next run hits step 1
+          if (key && releaseId) {
+            await supabaseAdmin
+              .from("release_external_ids")
+              .upsert(releaseExternalIdRow(releaseId, "xbox", key), { onConflict: "source,external_id" });
+          }
 
           // 3) IGDB enrichment (best-effort)
           // Fill game fields + optionally cover if we got one

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
-import { igdbSearchBest } from "@/lib/igdb/server";
+import { igdbSearchBest, upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { mergeReleaseInto } from "@/lib/merge-release-into";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 type SteamOwnedGame = {
   appid: number;
@@ -92,89 +94,135 @@ export async function POST() {
       const appid = Number(g.appid);
       const title = (g.name || `Steam App ${appid}`).trim();
       const playtime = Number(g.playtime_forever || 0);
+      const steamExternalId = String(appid);
 
-      // A) Find existing release by steam_appid
-      const { data: existingRelease } = await supabaseAdmin
-        .from("releases")
-        .select("id, game_id, cover_url")
-        .eq("steam_appid", appid)
+      // 1) Resolve platform external id = steam appid
+      // 2) Find release_external_ids(source, external_id) → release_id
+      const { data: mapRow, error: mapErr } = await supabaseAdmin
+        .from("release_external_ids")
+        .select("release_id")
+        .eq("source", "steam")
+        .eq("external_id", steamExternalId)
         .maybeSingle();
 
-      let releaseId: string | null = existingRelease?.id ?? null;
-      let gameId: string | null = existingRelease?.game_id ?? null;
+      if (mapErr) {
+        return NextResponse.json(
+          { error: `release_external_ids lookup: ${mapErr.message}` },
+          { status: 500 }
+        );
+      }
 
-      // B) If no release exists, create game + release
-      if (!releaseId) {
-        // 1) Try to find existing game by canonical_title
-        const { data: existingGame, error: findErr } = await supabaseAdmin
-          .from("games")
-          .select("id")
-          .eq("canonical_title", title)
-          .maybeSingle();
+      let releaseId: string | null = mapRow?.release_id ? String(mapRow.release_id) : null;
+      let gameId: string | null = null;
 
-        if (findErr) {
-          return NextResponse.json(
-            { error: `Failed to lookup game for ${title}: ${findErr.message}` },
-            { status: 500 }
-          );
-        }
-
-        if (existingGame?.id) {
-          // Reuse existing game
-          gameId = existingGame.id;
-        } else {
-          // 2) Insert only if it doesn't exist
-          const { data: newGame, error: gErr } = await supabaseAdmin
-            .from("games")
-            .insert({ canonical_title: title })
-            .select("id")
-            .single();
-
-          if (gErr || !newGame?.id) {
-            console.warn("Steam sync warning:", title, gErr?.message);
-            continue;
-          }
-
-          gameId = newGame.id;
-        }
-
-        const { data: newRelease, error: rErr } = await supabaseAdmin
+      if (releaseId) {
+        const { data: rel } = await supabaseAdmin
           .from("releases")
-          .insert({
-            game_id: gameId,
-            display_title: title,
-            platform_name: "Steam",
-            platform_key: "steam",
-            steam_appid: appid,
-            cover_url: steamHeaderImage(appid),
-          })
-          .select("id")
-          .single();
-
-        if (rErr || !newRelease?.id) {
-          return NextResponse.json(
-            { error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` },
-            { status: 500 }
-          );
-        }
-
-        releaseId = newRelease.id;
-        imported += 1;
-      } else {
-        // Update basic release fields safely
+          .select("id, game_id, cover_url")
+          .eq("id", releaseId)
+          .maybeSingle();
+        gameId = rel?.game_id ?? null;
         await supabaseAdmin
           .from("releases")
           .update({
             display_title: title,
             platform_name: "Steam",
             platform_key: "steam",
-            cover_url: existingRelease?.cover_url ?? steamHeaderImage(appid),
+            cover_url: rel?.cover_url ?? steamHeaderImage(appid),
             updated_at: new Date().toISOString(),
           })
           .eq("id", releaseId);
-
         updated += 1;
       }
+
+      // 3) If no release: (1) game_id (2) find by (platform_key, game_id) (3) insert with 23505 (4) upsert mapping; if mapped release_id differs, merge
+      if (!releaseId) {
+        try {
+          const { game_id: gid } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "steam" });
+          gameId = gid;
+        } catch {
+          console.warn("Steam sync: game resolution failed for", title);
+          continue;
+        }
+
+        const { data: existingRelease, error: findErr } = await supabaseAdmin
+          .from("releases")
+          .select("id")
+          .eq("platform_key", "steam")
+          .eq("game_id", gameId)
+          .maybeSingle();
+
+        if (findErr) {
+          console.warn("Steam sync: release lookup failed", findErr.message);
+          continue;
+        }
+
+        if (existingRelease?.id) {
+          releaseId = existingRelease.id;
+        } else {
+          const { data: newRelease, error: rErr } = await supabaseAdmin
+            .from("releases")
+            .insert({
+              game_id: gameId,
+              display_title: title,
+              platform_name: "Steam",
+              platform_key: "steam",
+              steam_appid: appid,
+              cover_url: steamHeaderImage(appid),
+            })
+            .select("id")
+            .single();
+
+          if (rErr) {
+            const code = (rErr as { code?: string })?.code;
+            if (code === "23505") {
+              const { data: raced } = await supabaseAdmin
+                .from("releases")
+                .select("id")
+                .eq("platform_key", "steam")
+                .eq("game_id", gameId)
+                .maybeSingle();
+              if (raced?.id) releaseId = String(raced.id);
+              else {
+                console.warn("Steam sync: 23505 but no row found for", title);
+                continue;
+              }
+            } else {
+              return NextResponse.json(
+                { error: `Failed to insert release for ${title}: ${rErr?.message || "unknown"}` },
+                { status: 500 }
+              );
+            }
+          } else if (newRelease?.id) {
+            releaseId = String(newRelease.id);
+            imported += 1;
+          } else {
+            console.warn("Steam sync: no id returned for", title);
+            continue;
+          }
+        }
+
+        await supabaseAdmin
+          .from("release_external_ids")
+          .upsert(releaseExternalIdRow(releaseId, "steam", steamExternalId), {
+            onConflict: "source,external_id",
+            ignoreDuplicates: true,
+          });
+
+        const { data: currentMap } = await supabaseAdmin
+          .from("release_external_ids")
+          .select("release_id")
+          .eq("source", "steam")
+          .eq("external_id", steamExternalId)
+          .maybeSingle();
+
+        if (currentMap?.release_id && String(currentMap.release_id) !== releaseId) {
+          await mergeReleaseInto(supabaseAdmin, String(currentMap.release_id), releaseId);
+          releaseId = String(currentMap.release_id);
+        }
+      }
+
+      if (!releaseId) continue;
 
       // Incoming last played
       const incomingLastPlayed =

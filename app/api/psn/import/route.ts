@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
-import { igdbSearchBest } from "@/lib/igdb/server";
+import { upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
 function normTitle(t: string) {
   return (t || "")
@@ -22,72 +23,6 @@ function deMashTitle(s: string) {
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/([A-Za-z])(\d)/g, "$1 $2")
     .replace(/(\d)([A-Za-z])/g, "$1 $2");
-}
-
-function cleanTitleForIgdb(title: string) {
-  return deMashTitle(String(title || ""))
-    .replace(/™|®/g, "")
-    .replace(/\(.*?\)/g, " ")
-    .replace(/\[.*?\]/g, " ")
-    .replace(
-      /:\s*(standard|deluxe|gold|ultimate|complete|anniversary|remastered|definitive|edition).*/i,
-      ""
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function upsertGameIgdbFirst(admin: any, titleName: string) {
-  const raw = String(titleName || "").trim();
-  if (!raw) throw new Error("titleName empty");
-
-  const cleaned = cleanTitleForIgdb(raw);
-  const hit = cleaned ? await igdbSearchBest(cleaned) : null;
-
-  if (hit?.igdb_game_id) {
-    const canonical = String(hit.title || raw).trim() || raw;
-    const patch: any = {
-      igdb_game_id: Number(hit.igdb_game_id),
-      canonical_title: canonical,
-      updated_at: new Date().toISOString(),
-    };
-    if (hit.summary != null) patch.summary = hit.summary;
-    if (hit.developer != null) patch.developer = hit.developer;
-    if (hit.publisher != null) patch.publisher = hit.publisher;
-    if (hit.first_release_year != null) patch.first_release_year = hit.first_release_year;
-    if (Array.isArray(hit.genres) && hit.genres.length) patch.genres = hit.genres;
-    if (hit.cover_url) patch.cover_url = hit.cover_url;
-
-    const { data: existingByIgdb, error: findErr } = await admin
-      .from("games")
-      .select("id")
-      .eq("igdb_game_id", Number(hit.igdb_game_id))
-      .maybeSingle();
-
-    if (findErr) throw new Error(`game lookup (igdb_game_id) failed: ${findErr.message}`);
-
-    if (existingByIgdb?.id) {
-      const { error: updErr } = await admin.from("games").update(patch).eq("id", existingByIgdb.id);
-      if (updErr) throw new Error(`game update (igdb_game_id) failed: ${updErr.message}`);
-      return String(existingByIgdb.id);
-    }
-
-    const { data: gameRow, error: gErr } = await admin
-      .from("games")
-      .upsert(patch, { onConflict: "canonical_title" })
-      .select("id")
-      .single();
-    if (gErr || !gameRow?.id) throw new Error(`game upsert (canonical_title) failed: ${gErr?.message || "unknown"}`);
-    return String(gameRow.id);
-  }
-
-  const { data: gameRow, error: gErr } = await admin
-    .from("games")
-    .upsert({ canonical_title: raw }, { onConflict: "canonical_title" })
-    .select("id")
-    .single();
-  if (gErr || !gameRow?.id) throw new Error(`game upsert (canonical_title) failed: ${gErr?.message || "unknown"}`);
-  return String(gameRow.id);
 }
 
 export async function POST() {
@@ -159,7 +94,8 @@ export async function POST() {
       // B) if no game found, create/attach one (IGDB-first, fallback to title)
       if (!gameId) {
         try {
-          gameId = await upsertGameIgdbFirst(supabaseAdmin, title);
+          const { game_id } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "psn" });
+          gameId = game_id;
           if (gameId) createdGames += 1;
         } catch {
           continue;
@@ -213,10 +149,7 @@ export async function POST() {
         if (npid && releaseId) {
           await supabaseAdmin
             .from("release_external_ids")
-            .upsert(
-              { release_id: releaseId, source: "psn", external_id: npid, external_id_type: "np_communication_id" },
-              { onConflict: "source,external_id" }
-            );
+            .upsert(releaseExternalIdRow(releaseId, "psn", npid), { onConflict: "source,external_id" });
         }
       }
 
