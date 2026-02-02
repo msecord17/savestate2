@@ -1,0 +1,42 @@
+---
+description: Identity and insight copy rules — verb discipline, confidence language, tone. Prevents trust breaks.
+globs: web/lib/identity/**/*.ts, web/components/GamerIdentityCard.tsx, web/components/InsightRail.tsx, web/components/EraStrip.tsx, web/components/CollectorBadge.tsx, web/app/api/**/identity/**/*.ts, web/app/profile/**/*.tsx, web/app/gamehome/**/*.tsx
+alwaysApply: false
+---
+
+# Identity copy rules (PASS 3 — crucial)
+
+Apply these rules whenever writing or generating copy for Gamer Identity Card, Insight Rail, Era Strip, Collector Badge, or any identity/insight API output. **Never mix play and collector verbs.** This is a mirror, not a coach.
+
+## Verb discipline
+
+**Play signals:** played / completed / finished / returned to
+
+**Collector signals:** own / collect / curate / preserve
+
+**Inference:** looks like / tends to / often
+
+**Never mix them.**
+
+- ❌ “You completed many PS2 games” (from ownership)
+- ✅ “You own a large PS2-era library”
+
+## Confidence language
+
+- **core** → declarative  
+  “You are a Completionist.”
+
+- **strong** → soft declarative  
+  “Completionist tendencies show up strongly.”
+
+- **emerging** → suggestive  
+  “You may be leaning toward a Completionist style.”
+
+## Insight tone rules
+
+- No value judgment
+- No leaderboard framing
+- No “better than others”
+- No “you should”
+
+**This is a mirror, not a coach.**

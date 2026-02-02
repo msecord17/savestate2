@@ -1,0 +1,30 @@
+---
+description: Component rules — GameCard cover fallback, insight density, tone. Give this to Cursor.
+globs: web/components/**/*.tsx, web/lib/images/**/*.ts, web/app/gamehome/**/*.tsx, web/app/profile/**/*.tsx
+alwaysApply: false
+---
+
+# Component rules
+
+Apply these whenever editing GameCard, cover resolution, insight sections, or identity/insight copy.
+
+## GameCard fallback order
+
+1. **Game cover (IGDB)** — canonical
+2. **Release cover** — only if game cover is null
+3. **Neutral placeholder** — never platform art
+
+Never use platform art (Steam header, PSN icon, Xbox art, RA screenshot) as the final fallback. Use a neutral placeholder.
+
+## Insight density
+
+- **One major insight per section**
+- **Never stack more than 2 sentences**
+
+## Tone rules
+
+- “You tend to…”
+- “It looks like…”
+- “Based on…”
+
+**No absolutes. No judgment.**
