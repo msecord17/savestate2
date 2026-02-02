@@ -49,15 +49,16 @@ export type CoverInput = {
   }
 
   /**
-   * Cover contract: default from games.cover_url; releases.cover_url is optional override.
-   * Ladder: 1) release.cover_url (if valid) 2) game.cover_url 3) Steam header 4) PSN icon 5) IGDB 6) placeholder
+   * Cover precedence: game.cover_url (IGDB canonical) first, then release.cover_url (platform fallback), then placeholder.
+   * RA / other provider art must never win over IGDB.
+   * Ladder: 1) game.cover_url (if valid) 2) release.cover_url 3) Steam header 4) PSN icon 5) IGDB 6) placeholder
    */
   export function resolveCoverUrl(input: CoverInput): string {
-    const cover = (input.cover_url ?? "").trim();
-    if (cover && isValidCoverUrl(cover)) return cover;
-  
     const gameCover = (input.game_cover_url ?? "").trim();
     if (gameCover && isValidCoverUrl(gameCover)) return gameCover;
+
+    const cover = (input.cover_url ?? "").trim();
+    if (cover && isValidCoverUrl(cover)) return cover;
   
     const appid = (input.steam_appid ?? "").trim();
     if (appid) return steamHeader(appid);

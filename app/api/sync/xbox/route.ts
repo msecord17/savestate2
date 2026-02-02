@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
-import { upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { cleanTitleForXboxIgdb, upsertGameIgdbFirst } from "@/lib/igdb/server";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
+import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
 type XboxTitle = {
   name: string;
@@ -172,10 +173,11 @@ export async function POST(req: Request) {
         updated += 1;
       }
 
-      // 3) If no release: (1) game_id (2) find by (platform_key, game_id) (3) insert with 23505 (4) upsert mapping; if mapped release_id differs, merge
+      // 3) If no release: (1) game_id via IGDB (Xbox-cleaned title) (2) find by (platform_key, game_id) (3) insert with 23505 (4) upsert mapping; if mapped release_id differs, merge
       if (!releaseId) {
         try {
-          const { game_id: gid } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "xbox" });
+          const cleanedForIgdb = cleanTitleForXboxIgdb(title);
+          const { game_id: gid } = await upsertGameIgdbFirst(supabaseAdmin, cleanedForIgdb, { platform_key: "xbox" });
           gameId = gid;
         } catch (e: any) {
           errors.push(`game for ${title}: ${e?.message || "unknown"}`);
@@ -197,44 +199,61 @@ export async function POST(req: Request) {
         if (existingRelease?.id) {
           releaseId = String(existingRelease.id);
         } else {
-          const { data: newRelease, error: rErr } = await supabaseAdmin
+          // Fallback: find existing by (platform_key, display_title, platform_label) and attach game_id (avoid duplicate release)
+          const { data: existingByTitle, error: titleErr } = await supabaseAdmin
             .from("releases")
-            .insert({
-              game_id: gameId,
-              display_title: title,
-              platform_name: "Xbox",
-              platform_key: slugPlatformKey(),
-              platform_label: "Xbox",
-              cover_url: null,
-              xbox_title_id: xboxTitleId,
-            })
             .select("id")
-            .single();
+            .eq("platform_key", slugPlatformKey())
+            .eq("display_title", title.trim())
+            .eq("platform_label", "Xbox")
+            .maybeSingle();
 
-          if (rErr) {
-            const code = (rErr as { code?: string })?.code;
-            if (code === "23505") {
-              const { data: raced } = await supabaseAdmin
-                .from("releases")
-                .select("id")
-                .eq("platform_key", slugPlatformKey())
-                .eq("game_id", gameId)
-                .maybeSingle();
-              if (raced?.id) releaseId = String(raced.id);
-              else {
-                errors.push(`release 23505 but no row for ${title}`);
+          if (!titleErr && existingByTitle?.id) {
+            releaseId = String(existingByTitle.id);
+            await supabaseAdmin
+              .from("releases")
+              .update({ game_id: gameId, xbox_title_id: xboxTitleId, updated_at: new Date().toISOString() })
+              .eq("id", releaseId);
+          } else {
+            const { data: newRelease, error: rErr } = await supabaseAdmin
+              .from("releases")
+              .insert({
+                game_id: gameId,
+                display_title: title,
+                platform_name: "Xbox",
+                platform_key: slugPlatformKey(),
+                platform_label: "Xbox",
+                cover_url: null,
+                xbox_title_id: xboxTitleId,
+              })
+              .select("id")
+              .single();
+
+            if (rErr) {
+              const code = (rErr as { code?: string })?.code;
+              if (code === "23505") {
+                const { data: raced } = await supabaseAdmin
+                  .from("releases")
+                  .select("id")
+                  .eq("platform_key", slugPlatformKey())
+                  .eq("game_id", gameId)
+                  .maybeSingle();
+                if (raced?.id) releaseId = String(raced.id);
+                else {
+                  errors.push(`release 23505 but no row for ${title}`);
+                  continue;
+                }
+              } else {
+                errors.push(`release insert ${title}: ${rErr?.message || "unknown"}`);
                 continue;
               }
+            } else if (newRelease?.id) {
+              releaseId = String(newRelease.id);
+              imported += 1;
             } else {
-              errors.push(`release insert ${title}: ${rErr?.message || "unknown"}`);
+              errors.push(`release insert ${title}: no id returned`);
               continue;
             }
-          } else if (newRelease?.id) {
-            releaseId = String(newRelease.id);
-            imported += 1;
-          } else {
-            errors.push(`release insert ${title}: no id returned`);
-            continue;
           }
         }
 
@@ -322,6 +341,12 @@ export async function POST(req: Request) {
         gamertag,
         warning: `Profile stamp failed: ${profErr.message}`,
       });
+    }
+
+    try {
+      await recomputeArchetypesForUser(supabaseUser, user.id);
+    } catch {
+      // Non-fatal: sync succeeded; archetype snapshot will refresh on next GET or recompute
     }
 
     return NextResponse.json({

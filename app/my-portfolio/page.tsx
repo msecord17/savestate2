@@ -185,7 +185,7 @@ export default function MyPortfolioPage() {
                   }}
                 >
                   {(() => {
-                    const coverUrl = rel?.cover_url ?? rel?.games?.cover_url;
+                    const coverUrl = rel?.games?.cover_url ?? rel?.cover_url;
                     const cover =
                       coverUrl &&
                       !coverUrl.includes("unknown.png") &&

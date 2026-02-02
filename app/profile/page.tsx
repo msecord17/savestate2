@@ -329,7 +329,7 @@ export default function ProfilePage() {
                   </Link>
                   <button
                     type="button"
-                    onClick={() => runSync("/api/sync/steam", "Steam")}
+                    onClick={() => runSync("/api/sync/steam-thin", "Steam")}
                     style={{
                       padding: "8px 12px",
                       borderRadius: 12,

@@ -4,25 +4,8 @@ import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { upsertGameIgdbFirst } from "@/lib/igdb/server";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
 
-function normTitle(t: string) {
-  return (t || "")
-    .toLowerCase()
-    .replace(/[\u2122\u00ae]/g, "") // ™ ®
-    .replace(/[^a-z0-9\s:.-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function psnPlatformKey() {
   return "psn";
-}
-
-// Split CamelCase / mashed titles (TigerWoodsPGATOUR07 → Tiger Woods PGA TOUR 07)
-function deMashTitle(s: string) {
-  return (s || "")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/([A-Za-z])(\d)/g, "$1 $2")
-    .replace(/(\d)([A-Za-z])/g, "$1 $2");
 }
 
 export async function POST() {
@@ -68,38 +51,16 @@ export async function POST() {
       if (!titleRaw) continue;
 
       const title = titleRaw;
-      const norm = normTitle(title);
-
       const npid = String((r as any)?.np_communication_id ?? "").trim();
 
-      // A) try to find existing game by canonical title (fast+cheap MVP)
-      //    we do 2 passes: exact-ish normalized match, then ilike contains.
+      // Resolve game only via IGDB-first (no canonical_title lookup)
       let gameId: string | null = null;
-
-      // exact-ish pass (fetch a small window and compare normalized)
-      {
-        const { data: candidates } = await supabaseAdmin
-          .from("games")
-          .select("id, canonical_title")
-          .ilike("canonical_title", `%${title.replace(/%/g, "")}%`)
-          .limit(20);
-
-        if (Array.isArray(candidates)) {
-          const found = candidates.find((c: any) => normTitle(String(c.canonical_title || "")) === norm);
-          if (found?.id) gameId = found.id;
-          else if (candidates[0]?.id) gameId = candidates[0].id; // fallback: first candidate
-        }
-      }
-
-      // B) if no game found, create/attach one (IGDB-first, fallback to title)
-      if (!gameId) {
-        try {
-          const { game_id } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "psn" });
-          gameId = game_id;
-          if (gameId) createdGames += 1;
-        } catch {
-          continue;
-        }
+      try {
+        const { game_id } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "psn" });
+        gameId = game_id;
+        if (gameId) createdGames += 1;
+      } catch {
+        continue;
       }
 
       if (!gameId) continue;

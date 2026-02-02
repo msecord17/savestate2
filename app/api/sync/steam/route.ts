@@ -4,6 +4,7 @@ import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { igdbSearchBest, upsertGameIgdbFirst } from "@/lib/igdb/server";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
+import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
 type SteamOwnedGame = {
   appid: number;
@@ -230,7 +231,7 @@ export async function POST() {
           ? new Date(g.rtime_last_played * 1000).toISOString()
           : null;
 
-      // ✅ D) IGDB enrichment (runs for BOTH new + existing entries)
+      // ✅ D) IGDB enrichment only when igdb_game_id IS NULL (spine rule: never re-search a good match)
       if (gameId) {
         const { data: gameRow } = await supabaseAdmin
           .from("games")
@@ -360,6 +361,12 @@ export async function POST() {
         { error: `Failed to update profile sync stamp: ${profUpdErr.message}` },
         { status: 500 }
       );
+    }
+
+    try {
+      await recomputeArchetypesForUser(supabaseUser, user.id);
+    } catch {
+      // Non-fatal: sync succeeded; archetype snapshot will refresh on next GET or recompute
     }
 
     return NextResponse.json({

@@ -15,6 +15,8 @@ export async function mergeReleaseInto(admin: any, winnerId: string, loserId: st
   for (const table of tablesWithReleaseId) {
     await admin.from(table).update({ release_id: winnerId }).eq("release_id", loserId);
   }
+  // release_enrichment_state is keyed by release_id; drop loser row (winner may already have one)
+  await admin.from("release_enrichment_state").delete().eq("release_id", loserId);
   const { data: extRows } = await admin
     .from("release_external_ids")
     .select("source, external_id")

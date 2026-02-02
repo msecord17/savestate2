@@ -130,10 +130,10 @@ function reduceToGameCards(releaseCards: ReleaseCard[], gameCoversByGameId: Map<
     const titles = rels.map((x) => x.title).filter(Boolean);
     const title = titles.sort((a, b) => a.length - b.length)[0] ?? rels[0]?.title ?? "Untitled";
 
-    // Fallback chain: release.cover_url -> game.cover_url -> null
-    const releaseCover = rels.find((x) => x.cover_url)?.cover_url ?? null;
+    // Cover precedence: game.cover_url (IGDB canonical) first, then release.cover_url (platform fallback)
     const gameCover = gameCoversByGameId.get(game_id) ?? null;
-    const cover_url = releaseCover ?? gameCover ?? null;
+    const releaseCover = rels.find((x) => x.cover_url)?.cover_url ?? null;
+    const cover_url = gameCover ?? releaseCover ?? null;
     const status = bestStatus(rels.map((x) => x.status));
 
     const platforms = uniq(
@@ -221,6 +221,8 @@ function reduceToGameCards(releaseCards: ReleaseCard[], gameCoversByGameId: Map<
   return out;
 }
 
+const PAGE_SIZE = 50;
+
 export async function GET(req: Request) {
   const supabase = await supabaseRouteClient();
   const { data: userRes } = await supabase.auth.getUser();
@@ -229,6 +231,8 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
   const mode = url.searchParams.get("mode") || "game";
+  const cursorParam = url.searchParams.get("cursor") ?? "";
+  const offset = Math.max(0, parseInt(cursorParam, 10) || 0);
 
   const { data: entries, error: eErr } = await supabase
     .from("portfolio_entries")
@@ -253,12 +257,17 @@ export async function GET(req: Request) {
       )
     `
     )
-    .eq("user_id", user.id);
+    .eq("user_id", user.id)
+    .order("updated_at", { ascending: false })
+    .order("release_id", { ascending: true })
+    .range(offset, offset + PAGE_SIZE);
 
   if (eErr) return NextResponse.json({ error: eErr.message }, { status: 500 });
 
   const rows = Array.isArray(entries) ? entries : [];
-  const releaseIds = rows.map((r: any) => r?.release_id).filter(Boolean);
+  const hasMore = rows.length > PAGE_SIZE;
+  const pageRows = hasMore ? rows.slice(0, PAGE_SIZE) : rows;
+  const releaseIds = pageRows.map((r: any) => r?.release_id).filter(Boolean);
 
   const psnByRelease: Record<string, any> = {};
   if (releaseIds.length) {
@@ -317,7 +326,7 @@ export async function GET(req: Request) {
     }
   }
 
-  const releaseCards = rows
+  const releaseCards = pageRows
     .map((r: any) => {
       const rel = r?.releases;
       if (!rel?.id) return null;
@@ -359,10 +368,9 @@ export async function GET(req: Request) {
       if (steamMinutes > 0) lastSignalAt = maxIso(lastSignalAt, entryUpdated);
 
       const gameCover = (rel as any)?.games?.cover_url ?? null;
-      
-      // Fallback chain: release.cover_url -> game.cover_url -> psn icon -> null
       const releaseCover = rel.cover_url ?? null;
-      const cover_url = releaseCover ?? gameCover ?? psn?.title_icon_url ?? null;
+      // Cover precedence: game.cover_url (IGDB canonical) first, then release, then psn icon
+      const cover_url = gameCover ?? releaseCover ?? psn?.title_icon_url ?? null;
       
       return {
         release_id: rid,
@@ -397,13 +405,22 @@ export async function GET(req: Request) {
     })
     .filter((c): c is ReleaseCard => c !== null);
 
+  const nextCursor = hasMore ? String(offset + PAGE_SIZE) : null;
+
   if (mode === "release") {
-    return NextResponse.json({ ok: true, mode, total: releaseCards.length, cards: releaseCards });
+    return NextResponse.json({
+      ok: true,
+      mode,
+      total: releaseCards.length,
+      cards: releaseCards,
+      next_cursor: nextCursor,
+      has_more: hasMore,
+    });
   }
 
   // Build map of game_id -> game.cover_url for fallback in reduceToGameCards
   const gameCoversByGameId = new Map<string, string | null>();
-  for (const r of rows) {
+  for (const r of pageRows) {
     const rel = r?.releases;
     if (rel?.game_id && (rel as any)?.games?.cover_url) {
       const gameId = String(rel.game_id);
@@ -415,5 +432,12 @@ export async function GET(req: Request) {
   }
 
   const gameCards = reduceToGameCards(releaseCards, gameCoversByGameId);
-  return NextResponse.json({ ok: true, mode, total: gameCards.length, cards: gameCards });
+  return NextResponse.json({
+    ok: true,
+    mode,
+    total: gameCards.length,
+    cards: gameCards,
+    next_cursor: nextCursor,
+    has_more: hasMore,
+  });
 }

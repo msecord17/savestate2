@@ -3,6 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import ProgressBlock, { type ProgressSignal } from "@/components/progress/ProgressBlock";
+import { ArchetypeDetailDrawer } from "@/components/ArchetypeDetailDrawer";
+import { buildPayloadFromArchetypes } from "@/lib/archetypes/build-payload";
+import { getArchetypeCatalogEntry } from "@/lib/archetypes/catalog";
+import type { ArchetypeScore } from "@/lib/archetypes/score";
+import type { ArchetypesPayload } from "@/lib/archetypes/insights-types";
 import { resolveCoverUrl } from "@/lib/images/resolveCoverUrl";
 
 type Card = {
@@ -138,8 +143,11 @@ function getPlatformPlaceholder(platformKey: string | null | undefined): string 
 
 export default function GameHomePage() {
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [err, setErr] = useState("");
   const [cards, setCards] = useState<Card[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
 
   // filters
   const [platform, setPlatform] = useState<string>("all");
@@ -149,29 +157,96 @@ export default function GameHomePage() {
   const [sort, setSort] = useState<"recent" | "title">("recent");
   const [splitByPlatform, setSplitByPlatform] = useState<boolean>(false);
 
-  async function load() {
-    setLoading(true);
+  // Identity strip + drawer: from GET /api/insights/archetypes (payload.archetypes, insight)
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerKey, setDrawerKey] = useState<string | null>(null);
+  const [insightsPayload, setInsightsPayload] = useState<{
+    archetypes?: { top: ArchetypeScore[]; primary_era?: string | null; primary_archetype?: string | null };
+  } | null>(null);
+  const [archetypePayload, setArchetypePayload] = useState<ArchetypesPayload | null>(null);
+  const [insight, setInsight] = useState<{ headline: string; subline: string; compact_tag: string } | null>(null);
+
+  function openArchetypeDrawer(key: string) {
+    setDrawerKey(key);
+    setDrawerOpen(true);
+  }
+
+  async function loadArchetypes() {
+    try {
+      const base = typeof window !== "undefined" ? "" : (process.env.NEXT_PUBLIC_BASE_URL ?? "");
+      const res = await fetch(`${base}/api/insights/archetypes`, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data?.ok || !data.payload) return;
+      const p = data.payload;
+      if (p.archetypes != null) {
+        setInsightsPayload({
+          archetypes: {
+            ...p.archetypes,
+            primary_era: p.archetypes.primary_era ?? null,
+            primary_archetype: p.archetypes.primary_archetype ?? null,
+          },
+        });
+        setArchetypePayload(buildPayloadFromArchetypes(p.archetypes));
+      } else {
+        setArchetypePayload(p as ArchetypesPayload);
+      }
+      if (data.insight && typeof data.insight === "object") {
+        setInsight({
+          headline: data.insight.headline ?? "",
+          subline: data.insight.subline ?? "",
+          compact_tag: data.insight.compact_tag ?? "",
+        });
+      }
+    } catch {
+      // ignore; drawer falls back to fixture-only
+    }
+  }
+
+  async function load(cursor?: string | null) {
+    const isAppend = Boolean(cursor);
+    if (isAppend) setLoadingMore(true);
+    else setLoading(true);
     setErr("");
     try {
       const mode = splitByPlatform ? "release" : "game";
-      const res = await fetch(`/api/gamehome?mode=${mode}`, { cache: "no-store" });
+      const url = cursor
+        ? `/api/gamehome?mode=${mode}&cursor=${encodeURIComponent(cursor)}`
+        : `/api/gamehome?mode=${mode}`;
+      const res = await fetch(url, { cache: "no-store" });
       const text = await res.text();
       if (text.trim().startsWith("<")) throw new Error("Server returned HTML (auth redirect?)");
       const data = text ? JSON.parse(text) : null;
       if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
 
       const arr = Array.isArray(data?.cards) ? data.cards : [];
-      setCards(arr);
+      if (isAppend) {
+        setCards((prev) => [...prev, ...arr]);
+      } else {
+        setCards(arr);
+      }
+      setNextCursor(data?.next_cursor ?? null);
+      setHasMore(Boolean(data?.has_more));
     } catch (e: any) {
       setErr(e?.message || "Failed to load");
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
+  }
+
+  async function loadMore() {
+    if (nextCursor == null || loadingMore) return;
+    await load(nextCursor);
   }
 
   useEffect(() => {
     load();
   }, [splitByPlatform]);
+
+  useEffect(() => {
+    loadArchetypes();
+  }, []);
 
   const platforms = useMemo(() => {
     const set = new Set<string>();
@@ -295,6 +370,102 @@ export default function GameHomePage() {
             {err}
           </div>
         ) : null}
+
+        {/* Identity strip: era chip + archetype chip + blended insight line; chips open drawer */}
+        <section style={{ marginBottom: 20 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 10 }}>
+            Your style
+          </h2>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+            {insightsPayload?.archetypes?.primary_era && (
+              <button
+                type="button"
+                onClick={() => openArchetypeDrawer(`era_${insightsPayload.archetypes.primary_era}`)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "8px 14px",
+                  borderRadius: 999,
+                  border: "1px solid #e5e7eb",
+                  background: "var(--archetype-era, #34d399)",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: "#0f172a",
+                  cursor: "pointer",
+                }}
+              >
+                {getArchetypeCatalogEntry(`era_${insightsPayload.archetypes.primary_era}`)?.label ?? insightsPayload.archetypes.primary_era}
+              </button>
+            )}
+            {insightsPayload?.archetypes?.primary_archetype && (
+              <button
+                type="button"
+                onClick={() => openArchetypeDrawer(insightsPayload.archetypes!.primary_archetype!)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "8px 14px",
+                  borderRadius: 999,
+                  border: "1px solid #e5e7eb",
+                  background: getArchetypeCatalogEntry(insightsPayload.archetypes!.primary_archetype!)?.color_token ?? "#f8fafc",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: "#0f172a",
+                  cursor: "pointer",
+                }}
+              >
+                {getArchetypeCatalogEntry(insightsPayload.archetypes!.primary_archetype!)?.label ?? insightsPayload.archetypes!.primary_archetype}
+              </button>
+            )}
+            {(insightsPayload?.archetypes?.top ?? []).map((a) =>
+              a.key !== insightsPayload?.archetypes?.primary_archetype ? (
+                <button
+                  key={a.key}
+                  type="button"
+                  onClick={() => openArchetypeDrawer(a.key)}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "8px 14px",
+                    borderRadius: 999,
+                    border: "1px solid #e5e7eb",
+                    background: "#f8fafc",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: "#0f172a",
+                    cursor: "pointer",
+                  }}
+                >
+                  {a.tier && (
+                    <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#64748b" }}>
+                      {a.tier === "core" ? "Core" : a.tier === "strong" ? "Strong" : "Emerging"} ·{" "}
+                    </span>
+                  )}
+                  {a.name}
+                </button>
+              ) : null
+            )}
+          </div>
+          {insight && (insight.headline || insight.subline || insight.compact_tag) && (
+            <p style={{ marginTop: 10, fontSize: 14, color: "#64748b" }}>
+              {insight.headline && <strong style={{ color: "#0f172a" }}>{insight.headline}</strong>}
+              {insight.subline && ` · ${insight.subline}`}
+              {insight.compact_tag && (
+                <span style={{ marginLeft: 8, fontSize: 12, color: "#94a3b8" }}>{insight.compact_tag}</span>
+              )}
+            </p>
+          )}
+        </section>
+
+        <ArchetypeDetailDrawer
+          open={drawerOpen}
+          onClose={() => setDrawerOpen(false)}
+          archetypeKey={drawerKey}
+          archetypesTop={insightsPayload?.archetypes?.top ?? []}
+        />
 
         {loading ? (
           <div style={{ padding: 20, textAlign: "center", color: "#64748b" }}>Loading...</div>
@@ -426,7 +597,7 @@ export default function GameHomePage() {
                     const fallback = getPlatformPlaceholder(platformKey);
                     if (!releaseId) return null;
                     return (
-                      <Link key={card.game_id} href={`/releases/${releaseId}`} style={{ display: "block" }}>
+                      <Link key={releaseId} href={`/releases/${releaseId}`} style={{ display: "block" }}>
                         <div
                           style={{
                             borderRadius: 12,
@@ -503,7 +674,7 @@ export default function GameHomePage() {
                     const fallback = getPlatformPlaceholder(platformKey);
                     if (!releaseId) return null;
                     return (
-                      <Link key={card.game_id} href={`/releases/${releaseId}`} style={{ display: "block" }}>
+                      <Link key={releaseId} href={`/releases/${releaseId}`} style={{ display: "block" }}>
                         <div
                           style={{
                             borderRadius: 12,
@@ -580,7 +751,7 @@ export default function GameHomePage() {
                     const fallback = getPlatformPlaceholder(platformKey);
                     if (!releaseId) return null;
                     return (
-                      <Link key={card.game_id} href={`/releases/${releaseId}`} style={{ display: "block" }}>
+                      <Link key={releaseId} href={`/releases/${releaseId}`} style={{ display: "block" }}>
                         <div
                           style={{
                             borderRadius: 12,
@@ -669,10 +840,11 @@ export default function GameHomePage() {
                 const showPsnTrophies = c.psn_trophy_progress != null;
                 const showXboxGS = (c.xbox_gamerscore_total ?? 0) > 0;
 
-                // Ensure unique key in both modes
-                const uniqueKey = splitByPlatform
+                // Ensure unique key in both modes (append idx so same game on multiple platforms after "Show more" doesn't duplicate key)
+                const baseKey = splitByPlatform
                   ? (c.release_id ?? `${c.title}-${idx}`)
                   : (c.game_id ?? c.release_id ?? `${c.title}-${idx}`);
+                const uniqueKey = `${baseKey}-${idx}`;
 
                 return (
                   <div
@@ -841,6 +1013,27 @@ export default function GameHomePage() {
                 );
               })}
             </div>
+
+            {hasMore && (
+              <div style={{ marginTop: 24, textAlign: "center" }}>
+                <button
+                  type="button"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  style={{
+                    padding: "10px 20px",
+                    borderRadius: 12,
+                    border: "1px solid #e5e7eb",
+                    background: "white",
+                    fontWeight: 700,
+                    cursor: loadingMore ? "not-allowed" : "pointer",
+                    color: "#0f172a",
+                  }}
+                >
+                  {loadingMore ? "Loading…" : "Show more"}
+                </button>
+              </div>
+            )}
           </>
         )}
       </div>

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { igdbSearchBest } from "@/lib/igdb/server";
-import { cleanTitleForSearch } from "../catalog/backfill-covers/route";
+import { cleanTitleForIgdb, expandCommonAbbrevsForSearch, igdbSearchBest } from "@/lib/igdb/server";
 
 export async function POST(req: Request) {
   const supabaseAdmin = createClient(
@@ -12,7 +11,7 @@ export async function POST(req: Request) {
   const url = new URL(req.url);
   const limit = Math.min(Number(url.searchParams.get("limit") || 40), 80);
 
-  // Get Steam releases and their games; we'll enrich only those games missing igdb_game_id
+  // Get Steam releases and their games; only enrich when igdb_game_id IS NULL (spine rule: never re-search a good match)
   const { data: rows, error } = await supabaseAdmin
     .from("releases")
     .select("id, display_title, cover_url, game_id, platform_key, games(id, igdb_game_id)")
@@ -22,7 +21,7 @@ export async function POST(req: Request) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const targets = (rows ?? []).filter((r: any) => r?.game_id && !r?.games?.igdb_game_id);
+  const targets = (rows ?? []).filter((r: any) => r?.game_id && !r?.games?.igdb_game_id); // never re-search a good match
 
   let enriched = 0;
   let skipped = 0;
@@ -35,8 +34,10 @@ export async function POST(req: Request) {
     }
 
     // Try multiple search attempts with cleaned titles
-    const q1 = cleanTitleForSearch(raw);
-    const q2 = cleanTitleForSearch(raw.replace(/[:\-].*$/, "")); // drop subtitle if needed
+    const cleaned = cleanTitleForIgdb(raw);
+    const expanded = expandCommonAbbrevsForSearch(cleaned);
+    const q1 = (expanded || cleaned || "").trim() || raw;
+    const q2 = cleanTitleForIgdb(raw.replace(/[:\-].*$/, "")).trim() || raw;
 
     const hit = (await igdbSearchBest(q1)) ?? (await igdbSearchBest(q2));
     if (!hit?.igdb_game_id) {

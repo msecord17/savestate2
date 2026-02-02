@@ -117,7 +117,7 @@ export async function GET(req: Request) {
           ok: true,
           cached: false,
           fetched_at: null,
-          note: "No Steam mapping found for this release yet. Try running /api/steam/sync to create the mapping.",
+          note: "No Steam mapping found for this release yet. Run Steam sync (thin) at /api/sync/steam-thin or the Steam Sync page to create the mapping.",
           achievements: [],
         });
       }

@@ -753,7 +753,7 @@ export default function ReleaseDetailPage() {
                 borderRadius: 16,
                 border: "1px solid #e5e7eb",
                 background: (() => {
-                  const coverUrl = release.cover_url ?? release.games?.cover_url;
+                  const coverUrl = release.games?.cover_url ?? release.cover_url;
                   const cover =
                     coverUrl &&
                     !coverUrl.includes("unknown.png") &&

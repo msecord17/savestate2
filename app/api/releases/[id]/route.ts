@@ -303,8 +303,8 @@ export async function GET(
     }
 
     const bestCover =
-      (release as any)?.cover_url ||
       (release as any)?.games?.cover_url ||
+      (release as any)?.cover_url ||
       null;
 
     return NextResponse.json({

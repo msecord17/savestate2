@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "../../../../lib/supabase/route-client";
+import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
 type RARecentGame = {
   GameID?: number;
@@ -185,6 +186,12 @@ export async function POST() {
         updated_at: nowIso,
       })
       .eq("user_id", user.id);
+
+    try {
+      await recomputeArchetypesForUser(supabase, user.id);
+    } catch {
+      // Non-fatal: sync succeeded; archetype snapshot will refresh on next GET or recompute
+    }
 
     return NextResponse.json({
       ok: true,

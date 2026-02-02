@@ -3,6 +3,16 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* Archetype design tokens (no hex in UI; use these) */
+  --archetype-default: #94a3b8;
+  --archetype-completionist: #22d3ee;
+  --archetype-explorer: #a78bfa;
+  --archetype-retro-dabbler: #fbbf24;
+  --archetype-era: #34d399;
+  /* Tier badges */
+  --archetype-tier-emerging: #c7d2fe;
+  --archetype-tier-strong: #7dd3fc;
+  --archetype-tier-core: #67e8f9;
 }
 
 @theme inline {
