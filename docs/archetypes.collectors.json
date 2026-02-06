@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "archetypes": [
+    {
+      "key": "archivist",
+      "name": "Archivist",
+      "category": "collector",
+      "icon": "archive",
+      "drawer": {
+        "headline": "You collect with intent — and it shows.",
+        "what_it_means": [
+          "Your library isn't just big — it's a record.",
+          "You tend to keep games across eras instead of cycling through them."
+        ],
+        "verbs": ["own", "collect", "curate"],
+        "strength_copy": {
+          "emerging": "You're building a real archive.",
+          "strong": "Your collection is a deliberate body of work.",
+          "core": "You're a full-on preservation brain."
+        },
+        "signals_explained": [
+          { "label": "Owned games", "field": "owned_games" },
+          { "label": "Era coverage", "field": "era_entropy" },
+          { "label": "Platforms", "field": "unique_platforms" }
+        ]
+      },
+      "eligibility": {
+        "any": [
+          { "field": "owned_games", "op": ">=", "value": 200 },
+          { "field": "owned_releases", "op": ">=", "value": 250 },
+          { "field": "unique_platforms", "op": ">=", "value": 6 }
+        ]
+      },
+      "strength_tiers": [
+        {
+          "tier": "emerging",
+          "all": [
+            { "field": "owned_games", "op": ">=", "value": 200 }
+          ]
+        },
+        {
+          "tier": "strong",
+          "all": [
+            { "field": "owned_games", "op": ">=", "value": 400 },
+            { "field": "unique_platforms", "op": ">=", "value": 7 }
+          ]
+        },
+        {
+          "tier": "core",
+          "all": [
+            { "field": "owned_games", "op": ">=", "value": 700 },
+            { "field": "unique_platforms", "op": ">=", "value": 9 },
+            { "field": "era_entropy", "op": ">=", "value": 1.2 }
+          ]
+        }
+      ]
+    },
+
+    {
+      "key": "era_keeper",
+      "name": "Era Keeper",
+      "category": "collector",
+      "icon": "hourglass",
+      "drawer": {
+        "headline": "You're anchored to a specific era — in the best way.",
+        "what_it_means": [
+          "Your library has a gravitational center.",
+          "You keep returning to the same slice of gaming history."
+        ],
+        "verbs": ["own", "collect", "keep"],
+        "strength_copy": {
+          "emerging": "You're forming an era identity.",
+          "strong": "That era is clearly your home base.",
+          "core": "You're basically a walking museum exhibit."
+        },
+        "signals_explained": [
+          { "label": "Top era share", "field": "top_era_share" },
+          { "label": "Top era", "field": "top_era" },
+          { "label": "Retro/modern mix", "field": "retro_games" }
+        ]
+      },
+      "eligibility": {
+        "all": [
+          { "field": "owned_with_known_era", "op": ">=", "value": 80 },
+          { "field": "top_era_share", "op": ">=", "value": 0.35 }
+        ]
+      },
+      "strength_tiers": [
+        {
+          "tier": "emerging",
+          "all": [
+            { "field": "owned_with_known_era", "op": ">=", "value": 80 },
+            { "field": "top_era_share", "op": ">=", "value": 0.35 }
+          ]
+        },
+        {
+          "tier": "strong",
+          "all": [
+            { "field": "owned_with_known_era", "op": ">=", "value": 150 },
+            { "field": "top_era_share", "op": ">=", "value": 0.45 }
+          ]
+        },
+        {
+          "tier": "core",
+          "all": [
+            { "field": "owned_with_known_era", "op": ">=", "value": 250 },
+            { "field": "top_era_share", "op": ">=", "value": 0.55 }
+          ]
+        }
+      ]
+    },
+
+    {
+      "key": "physical_first_nostalgist",
+      "name": "Physical-First Nostalgist",
+      "category": "collector",
+      "icon": "package",
+      "drawer": {
+        "headline": "Your taste leans retro — even when the industry doesn't.",
+        "what_it_means": [
+          "You bias toward older eras and enduring favorites.",
+          "Your library reads like a time capsule."
+        ],
+        "verbs": ["own", "collect"],
+        "strength_copy": {
+          "emerging": "You're drifting retro.",
+          "strong": "Retro is a clear preference.",
+          "core": "You're basically allergic to modern-only libraries."
+        },
+        "signals_explained": [
+          { "label": "Retro games", "field": "retro_games" },
+          { "label": "Modern games", "field": "modern_games" }
+        ]
+      },
+      "eligibility": {
+        "all": [
+          { "field": "owned_games", "op": ">=", "value": 80 },
+          { "field": "retro_games", "op": ">=", "value": 40 }
+        ]
+      },
+      "strength_tiers": [
+        {
+          "tier": "emerging",
+          "all": [
+            { "field": "retro_games", "op": ">=", "value": 40 }
+          ]
+        },
+        {
+          "tier": "strong",
+          "all": [
+            { "field": "retro_games", "op": ">=", "value": 100 },
+            { "field": "retro_games", "op": ">=", "value": 1.5, "relative_to": "modern_games" }
+          ]
+        },
+        {
+          "tier": "core",
+          "all": [
+            { "field": "retro_games", "op": ">=", "value": 200 },
+            { "field": "retro_games", "op": ">=", "value": 2.5, "relative_to": "modern_games" }
+          ]
+        }
+      ]
+    }
+  ]
+}

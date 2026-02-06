@@ -1,0 +1,24 @@
+---
+description: Mobile-first layout rules for Identity Strip and Archetype Drawer (non-negotiable).
+globs: app/components/identity/*.tsx, components/IdentityStrip.tsx, components/ArchetypeDetailDrawer.tsx, components/archetypes/*.tsx, src/ui/*.tsx
+---
+
+# Mobile-first layout rules (v1)
+
+Enforce these in components so they can't regress:
+
+1. **Tap target**: All interactive chips and buttons must use `min-h-[44px] min-w-[44px]` (or `w-11 h-11` for square 44px). No smaller hit targets. Close button in drawer: `w-11 h-11` (44px).
+
+2. **No hover-only**: Every interactive element must have tap/click feedback (e.g. `active:` or `focus:`). Hover styles are optional and must not be the only affordance.
+
+3. **Drawer scroll**: Only the panel inner content scrolls. Use `flex flex-col` on the panel, `shrink-0` on the header, and `flex-1 min-h-0 overflow-y-auto` on the scroll area so the page does not scroll when the drawer is open (no nested scroll hell).
+
+4. **Drawer safe-area**: Scroll area in bottom sheet must include `pb-[env(safe-area-inset-bottom)]` so content clears the device safe area.
+
+5. **Identity Strip scroll**: Single horizontal scroll container (`overflow-x-auto scrollbar-none`). No vertical scroll inside the strip.
+
+6. **Drawer placement**: Bottom sheet on mobile (bottom-0 left-0 right-0 max-h-[85vh]); side panel on desktop (md:right-0 md:top-0 md:w-[460px]).
+
+7. **Lint (optional)**: In IdentityStrip and ArchetypeDrawer, any button with `h-8` or smaller fixed height should be bumped to `min-h-[44px]` or `w-11 h-11`. Search for `h-8` in these files and replace with 44px-equivalent.
+
+8. **Copy verbs**: In drawer and insights use: play evidence = "played / completed"; collector evidence = "own / curated"; inference = "looks like / based on".

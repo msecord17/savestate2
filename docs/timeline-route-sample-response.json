@@ -1,0 +1,42 @@
+{
+  "ok": true,
+  "user_id": "550e8400-e29b-41d4-a716-446655440000",
+  "mode": "dominance",
+  "eras": [
+    {
+      "era": "ps4_xbo",
+      "label": "PS4 era",
+      "years": "2013–2016",
+      "rank": 1,
+      "games": 42,
+      "releases": 48,
+      "topSignals": [
+        { "key": "top_platform", "label": "Top platform: PlayStation" },
+        { "key": "achievements", "label": "Achievements: 120/340" },
+        { "key": "playtime", "label": "Playtime: 85h" }
+      ],
+      "notable": [
+        { "release_id": "a1b2c3d4-0001-4000-8000-000000000001", "title": "The Last of Us Part II", "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co2lcm.jpg" },
+        { "release_id": "a1b2c3d4-0002-4000-8000-000000000002", "title": "Horizon Zero Dawn", "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co1wzo.jpg" },
+        { "release_id": "a1b2c3d4-0003-4000-8000-000000000003", "title": "God of War", "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co1r94.jpg" }
+      ]
+    },
+    {
+      "era": "modern",
+      "label": "Modern",
+      "years": "2020+",
+      "rank": 2,
+      "games": 28,
+      "releases": 31,
+      "topSignals": [
+        { "key": "top_platform", "label": "Top platform: Steam" },
+        { "key": "playtime", "label": "Playtime: 120h" }
+      ],
+      "notable": [
+        { "release_id": "b2c3d4e5-0001-4000-8000-000000000004", "title": "Elden Ring", "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co4j1r.jpg" },
+        { "release_id": "b2c3d4e5-0002-4000-8000-000000000005", "title": "Hades", "cover_url": "https://images.igdb.com/igdb/image/upload/t_cover_big/co2lcf.jpg" },
+        { "release_id": "b2c3d4e5-0003-4000-8000-000000000006", "title": "Vampire Survivors", "cover_url": null }
+      ]
+    }
+  ]
+}

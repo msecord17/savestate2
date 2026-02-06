@@ -1,0 +1,13 @@
+---
+description: Enforce Core never imports UI. Multi-platform structural rails.
+globs: src/core/**/*
+---
+
+# Core boundary
+
+- **src/core** must NEVER import from:
+  - **src/ui**
+  - **app/** (pages, layout)
+  - **components/** (React UI)
+- Core may import from: **lib/** (Supabase, server utils), **src/core** (self), **src/design** (tokens only if needed for type), **src/core/types**.
+- All `fetch('/api/...')` from UI must go through **src/core/api/** wrappers. No direct fetch in app or components for app APIs.
