@@ -239,13 +239,16 @@ async function fetchAchievementHistoryTitles(authorization: string, xuid: string
       break;
     }
 
+    // Add titles from this page; tag each with source platform for generation (360 vs One/Series)
+    const pageTitles = Array.isArray(json?.titles) ? json.titles : [];
+
     // Debug: log response structure (always log first page per platform)
     const debugInfo: any = {
       platform: platform.name,
       contractVersion: platform.version,
       page: pageCount,
       topLevelKeys: json ? Object.keys(json) : [],
-      titlesCount: Array.isArray(json?.titles) ? json.titles.length : 0,
+      titlesCount: pageTitles.length,
       hasPagingInfo: !!json?.pagingInfo,
       pagingInfoKeys: json?.pagingInfo ? Object.keys(json.pagingInfo) : [],
       pagingInfo: json?.pagingInfo ? JSON.parse(JSON.stringify(json.pagingInfo)) : null, // Deep clone to show full object
@@ -266,8 +269,6 @@ async function fetchAchievementHistoryTitles(authorization: string, xuid: string
       platformDebugs.push(debugInfo);
     }
 
-    // Add titles from this page; tag each with source platform for generation (360 vs One/Series)
-    const pageTitles = Array.isArray(json?.titles) ? json.titles : [];
     for (const raw of pageTitles) {
       allTitles.push({
         ...raw,

@@ -2,7 +2,8 @@
  * Data contract for Identity Strip. Re-exports from canonical lib/identity/types.
  */
 
-export type { IdentitySummary } from "@/lib/identity/types";
+import type { IdentitySummary } from "@/lib/identity/types";
+export type { IdentitySummary };
 
 /** Fixture that mirrors the future API shape. Use until scoring engine is wired. */
 export function getIdentitySummaryFixture(): IdentitySummary {
