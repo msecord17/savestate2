@@ -1,0 +1,277 @@
+{
+  "version": "2026-02-01",
+  "drawer_footer_note": "These insights are based on connected play data, optional collection imports, and long-term patterns. Ownership and play are treated as distinct signals.",
+  "archetypes": [
+    {
+      "key": "completionist",
+      "name": "Completionist",
+      "category": "play",
+      "icon": "target",
+      "header": "You finish what you start.",
+      "why": "You tend to see games through to the end. When you commit to a playthrough, you're more likely than most players to reach credits, final trophies, or end-state milestones instead of drifting away.",
+      "signals": [
+        {
+          "label": "Trophies & achievements",
+          "confidence": "high",
+          "copy": "You frequently complete structured goals."
+        },
+        {
+          "label": "Play progress",
+          "confidence": "medium",
+          "copy": "Many sessions reach late-game states."
+        },
+        {
+          "label": "Ownership",
+          "confidence": "context_only",
+          "copy": "Owning a game does not imply completion."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "You're starting to close the loop on more games than before.",
+        "strong": "Finishing games is a consistent pattern for you.",
+        "core": "Completion is a defining part of how you play."
+      }
+    },
+    {
+      "key": "explorer",
+      "name": "Explorer",
+      "category": "play",
+      "icon": "compass",
+      "header": "You value discovery over closure.",
+      "why": "You sample widely, follow curiosity, and enjoy seeing what a game has to offer without feeling obligated to finish everything. Breadth matters more than checkmarks.",
+      "signals": [
+        {
+          "label": "Library diversity",
+          "confidence": "high",
+          "copy": "You touch many different titles and genres."
+        },
+        {
+          "label": "Short-to-mid sessions",
+          "confidence": "medium",
+          "copy": "Play often happens in bursts rather than long arcs."
+        },
+        {
+          "label": "Trophies & achievements",
+          "confidence": "low",
+          "copy": "Completion signals are secondary."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "You're experimenting more than finishing.",
+        "strong": "Exploration is your default mode.",
+        "core": "Your play history is defined by curiosity."
+      }
+    },
+    {
+      "key": "era_keeper",
+      "name": "Era Keeper",
+      "category": "hybrid",
+      "icon": "hourglass",
+      "header": "You're anchored to a specific gaming era.",
+      "why": "Your collection and play history cluster strongly around particular hardware generations or time periods. Those eras aren't just nostalgic — they're where your taste lives.",
+      "signals": [
+        {
+          "label": "Era concentration",
+          "confidence": "high",
+          "copy": "A large share of your games come from the same eras."
+        },
+        {
+          "label": "Ownership",
+          "confidence": "high",
+          "copy": "Collections reinforce era focus."
+        },
+        {
+          "label": "Longevity",
+          "confidence": "medium",
+          "copy": "You return to these eras over time."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "Certain eras are starting to stand out.",
+        "strong": "You clearly favor specific generations.",
+        "core": "Era identity defines your gaming history."
+      }
+    },
+    {
+      "key": "nostalgist",
+      "name": "Nostalgist",
+      "category": "play",
+      "icon": "repeat",
+      "header": "You return to the games that shaped you.",
+      "why": "You revisit familiar titles, remasters, or series entries across platforms and years. Games aren't just experiences — they're touchstones.",
+      "signals": [
+        {
+          "label": "Replay behavior",
+          "confidence": "high",
+          "copy": "Multiple play sessions across time."
+        },
+        {
+          "label": "Multi-platform ownership",
+          "confidence": "medium",
+          "copy": "Same titles appear on different systems."
+        },
+        {
+          "label": "Time gaps",
+          "confidence": "medium",
+          "copy": "Revisits span years, not weeks."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "You're starting to revisit old favorites.",
+        "strong": "Replay is a recurring habit.",
+        "core": "Nostalgia strongly shapes what you play."
+      }
+    },
+    {
+      "key": "strategist",
+      "name": "Strategist",
+      "category": "play",
+      "icon": "brain",
+      "header": "You prefer systems that reward mastery.",
+      "why": "You gravitate toward games that demand planning, optimization, or tactical thinking. Progress comes from understanding systems, not reflex alone.",
+      "signals": [
+        {
+          "label": "Genre affinity (strategy, tactics, RPGs)",
+          "confidence": "high",
+          "copy": "Your play history clusters around deeper systems."
+        },
+        {
+          "label": "High-difficulty achievements",
+          "confidence": "medium",
+          "copy": "You pursue challenging goals when they're meaningful."
+        },
+        {
+          "label": "Deep-session play",
+          "confidence": "medium",
+          "copy": "You stick with games long enough to learn the systems."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "You're leaning into deeper systems.",
+        "strong": "Strategic play shows up often.",
+        "core": "Mastery is central to how you enjoy games."
+      }
+    },
+    {
+      "key": "archivist",
+      "name": "Archivist",
+      "category": "collector",
+      "icon": "library",
+      "header": "You collect with intention.",
+      "why": "You don't just own games — you organize, categorize, and preserve them. Your collection reflects care, memory, and long-term curation.",
+      "signals": [
+        {
+          "label": "Owned titles",
+          "confidence": "high",
+          "copy": "Your library is substantial."
+        },
+        {
+          "label": "Organization (tags, shelves, notes)",
+          "confidence": "high",
+          "copy": "You add structure that makes the collection usable."
+        },
+        {
+          "label": "Acquisition timeline",
+          "confidence": "medium",
+          "copy": "Your collecting history builds over time."
+        }
+      ],
+      "guardrail_note": "Ownership signals identity and care, not play or completion.",
+      "strength_tiers": {
+        "emerging": "Your collection is taking shape.",
+        "strong": "You actively curate your library.",
+        "core": "Archival instinct defines your hobby."
+      }
+    },
+    {
+      "key": "variant_hunter",
+      "name": "Variant Hunter",
+      "category": "collector",
+      "icon": "layers",
+      "header": "You seek versions, not just titles.",
+      "why": "You collect multiple editions, regions, or formats of the same game. Differences matter — packaging, platform, release context.",
+      "signals": [
+        {
+          "label": "Duplicate titles (multi-edition)",
+          "confidence": "high",
+          "copy": "You collect more than one version of the same game."
+        },
+        {
+          "label": "Regional variants",
+          "confidence": "medium",
+          "copy": "Different regions appear across your collection."
+        },
+        {
+          "label": "Edition metadata",
+          "confidence": "medium",
+          "copy": "Your library includes distinct releases beyond a single SKU."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "Variants are starting to appear.",
+        "strong": "You intentionally collect multiple versions.",
+        "core": "Variant tracking is a core behavior."
+      }
+    },
+    {
+      "key": "hardware_historian",
+      "name": "Hardware Historian",
+      "category": "collector",
+      "icon": "gamepad-2",
+      "header": "You care about the machines, not just the games.",
+      "why": "Your interest extends to consoles, peripherals, and oddball systems. You see hardware as part of gaming history, not just a delivery method.",
+      "signals": [
+        {
+          "label": "Console ownership",
+          "confidence": "high",
+          "copy": "You track systems as part of the hobby."
+        },
+        {
+          "label": "Accessories / oddball systems",
+          "confidence": "medium",
+          "copy": "Your library extends beyond standard setups."
+        },
+        {
+          "label": "Era spread",
+          "confidence": "medium",
+          "copy": "Your hardware interest spans generations."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "Hardware interest is growing.",
+        "strong": "You track systems intentionally.",
+        "core": "Hardware history is part of your identity."
+      }
+    },
+    {
+      "key": "curator",
+      "name": "Curator",
+      "category": "hybrid",
+      "icon": "sparkles",
+      "header": "You shape your library deliberately.",
+      "why": "You actively decide what belongs in your collection or backlog. Lists, filters, and organization matter as much as play itself.",
+      "signals": [
+        {
+          "label": "Lists & tags",
+          "confidence": "high",
+          "copy": "You organize games into meaningfully defined sets."
+        },
+        {
+          "label": "Ratings / notes",
+          "confidence": "medium",
+          "copy": "You capture taste, not just activity."
+        },
+        {
+          "label": "Ownership + play balance",
+          "confidence": "medium",
+          "copy": "Your library reflects choices, not just accumulation."
+        }
+      ],
+      "strength_tiers": {
+        "emerging": "You're starting to curate intentionally.",
+        "strong": "Organization reflects taste.",
+        "core": "Curation defines how you engage."
+      }
+    }
+  ]
+}

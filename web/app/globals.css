@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  /* Semantic roles (use in components; no hex in UI) */
+  --color-background: #ffffff;
+  --color-background-muted: #f8fafc;
+  --color-surface: #ffffff;
+  --color-surface-hover: #f1f5f9;
+  --color-text: #0f172a;
+  --color-text-muted: #64748b;
+  --color-text-inverse: #ffffff;
+  --color-border: #e2e8f0;
+  --color-border-strong: #cbd5e1;
+  --color-interactive: #3b82f6;
+  --color-interactive-hover: #2563eb;
+  --color-interactive-active: #1d4ed8;
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-error: #ef4444;
+  --color-info: #0ea5e9;
+  /* Archetype design tokens */
+  --archetype-default: #94a3b8;
+  --archetype-completionist: #22d3ee;
+  --archetype-explorer: #a78bfa;
+  --archetype-retro-dabbler: #fbbf24;
+  --archetype-era: #34d399;
+  --archetype-tier-emerging: #c7d2fe;
+  --archetype-tier-strong: #7dd3fc;
+  --archetype-tier-core: #67e8f9;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+    --color-background: #0a0a0a;
+    --color-background-muted: #18181b;
+    --color-surface: #18181b;
+    --color-surface-hover: #27272a;
+    --color-text: #fafafa;
+    --color-text-muted: #a1a1aa;
+    --color-border: #27272a;
+    --color-border-strong: #3f3f46;
+    --color-interactive: #60a5fa;
+    --color-interactive-hover: #93c5fd;
+    --color-interactive-active: #3b82f6;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.no-scrollbar::-webkit-scrollbar,
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar,
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.listPill {
+  cursor: default;
+}
+
+.listPill:hover .listTooltip {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.listTooltip {
+  position: absolute;
+  left: 0;
+  top: 18px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  box-shadow: 0 10px 20px rgba(0,0,0,0.08);
+  font-size: 12px;
+  color: #0f172a;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: all 120ms ease;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.listTooltip a:hover {
+  background: #f1f5f9;
+}
