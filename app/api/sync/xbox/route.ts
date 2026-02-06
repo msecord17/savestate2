@@ -12,6 +12,8 @@ type XboxTitle = {
   titleId?: string;
   pfTitleId?: string;
   devices?: string[];
+  /** From titles API: "Xbox 360" | "Xbox One" | "Xbox Series". Used for releases.platform_label and xbox_title_progress.title_platform. */
+  platform_label?: string;
   achievements_earned?: number;
   achievements_total?: number;
   gamerscore_earned?: number;
@@ -21,6 +23,13 @@ type XboxTitle = {
 
 function slugPlatformKey() {
   return "xbox";
+}
+
+/** Stable label for release and xbox_title_progress. Prefer API generation (360/One/Series), fallback "Xbox". */
+function platformLabelForTitle(t: XboxTitle): string {
+  const label = t.platform_label?.trim();
+  if (label === "Xbox 360" || label === "Xbox One" || label === "Xbox Series") return label;
+  return "Xbox";
 }
 
 function safeJson(text: string) {
@@ -99,8 +108,11 @@ export async function POST(req: Request) {
     const xuid = titlesJson?.xuid ?? null;
     const gamertag = titlesJson?.gamertag ?? null;
 
-    // Log for debugging - include full debug info from titles endpoint
+    // Log for debugging - include full debug info from titles endpoint and one title sample (for platform_label / release creation)
     console.log(`[Xbox Sync] Fetched ${titles.length} titles from API`);
+    if (titles.length > 0) {
+      console.log(`[Xbox Sync] First title (for release creation / platform_label):`, JSON.stringify(titles[0]));
+    }
     if (titlesJson?.debug) {
       console.log(`[Xbox Sync] Debug info from titles API:`, titlesJson.debug);
     }
@@ -136,6 +148,8 @@ export async function POST(req: Request) {
       const title = String(t.name || "").trim();
       if (!title) continue;
 
+      const platformLabel = platformLabelForTitle(t);
+
       // titleId must be numeric for achievements API to work
       const rawTitleId = t.titleId || t.pfTitleId;
       const xboxTitleId = rawTitleId != null ? String(rawTitleId).trim() : "";
@@ -170,6 +184,11 @@ export async function POST(req: Request) {
           .eq("id", releaseId)
           .maybeSingle();
         gameId = rel?.game_id ?? null;
+        // Backfill platform_label so re-syncs get 360/One/Series when we now have it
+        await supabaseAdmin
+          .from("releases")
+          .update({ platform_label: platformLabel, updated_at: new Date().toISOString() })
+          .eq("id", releaseId);
         updated += 1;
       }
 
@@ -205,14 +224,19 @@ export async function POST(req: Request) {
             .select("id")
             .eq("platform_key", slugPlatformKey())
             .eq("display_title", title.trim())
-            .eq("platform_label", "Xbox")
+            .eq("platform_label", platformLabel)
             .maybeSingle();
 
           if (!titleErr && existingByTitle?.id) {
             releaseId = String(existingByTitle.id);
             await supabaseAdmin
               .from("releases")
-              .update({ game_id: gameId, xbox_title_id: xboxTitleId, updated_at: new Date().toISOString() })
+              .update({
+                game_id: gameId,
+                xbox_title_id: xboxTitleId,
+                platform_label: platformLabel,
+                updated_at: new Date().toISOString(),
+              })
               .eq("id", releaseId);
           } else {
             const { data: newRelease, error: rErr } = await supabaseAdmin
@@ -222,7 +246,7 @@ export async function POST(req: Request) {
                 display_title: title,
                 platform_name: "Xbox",
                 platform_key: slugPlatformKey(),
-                platform_label: "Xbox",
+                platform_label: platformLabel,
                 cover_url: null,
                 xbox_title_id: xboxTitleId,
               })
@@ -296,8 +320,7 @@ export async function POST(req: Request) {
         });
       }
 
-      // Write per-title Xbox progress (so score can use it)
-      // NOTE: your xbox_title_progress table uses: title_id, title_name, achievements_*, gamerscore_*, last_played_at, release_id
+      // Write per-title Xbox progress (so score + played-on timeline can use generation)
       await supabaseUser
         .from("xbox_title_progress")
         .upsert(
@@ -305,7 +328,7 @@ export async function POST(req: Request) {
             user_id: user.id,
             title_id: xboxTitleId, // Must be numeric (validated above)
             title_name: title,
-            title_platform: "Xbox",
+            title_platform: platformLabel, // "Xbox 360" | "Xbox One" | "Xbox Series" | "Xbox"
             achievements_earned: t.achievements_earned ?? null,
             achievements_total: t.achievements_total ?? null,
             gamerscore_earned: t.gamerscore_earned ?? null,

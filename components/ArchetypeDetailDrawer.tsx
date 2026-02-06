@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import type { ArchetypeDetail, ArchetypeDetailSignal } from "@/lib/identity/types";
+import type { ArchetypeDetailLegacy, ArchetypeDetailSignal } from "@/lib/identity/types-legacy";
 import { getArchetypeCatalogEntry } from "@/lib/archetypes/catalog";
 import type { ArchetypeScore } from "@/lib/archetypes/score";
+import { DRAWER_SAFE_AREA_BOTTOM_CLASS, TOUCH_TARGET_CLASS } from "@/src/design/layout-rules";
 
 const STRENGTH_LABELS: Record<"emerging" | "strong" | "core", string> = {
   emerging: "Emerging",
@@ -15,6 +16,14 @@ const SIGNAL_STRENGTH_LABELS: Record<"low" | "medium" | "high", string> = {
   low: "Low",
   medium: "Medium",
   high: "High",
+};
+
+/** Copy verbs: play = played/completed, collector = own/curated, inference = looks like/based on */
+const SIGNAL_VERB_COPY: Record<string, string> = {
+  play: "played / completed",
+  ownership: "own / curated",
+  time: "based on",
+  curation: "curated",
 };
 
 function signalTypeHint(signal: ArchetypeDetailSignal): string | null {
@@ -36,7 +45,7 @@ export type ArchetypeDetailDrawerSnapshotProps = {
 /** Legacy props when passing pre-built detail. */
 export type ArchetypeDetailDrawerDetailProps = {
   open: boolean;
-  detail: ArchetypeDetail | null;
+  detail: ArchetypeDetailLegacy | null;
   onClose: () => void;
   onSelectBlend?: (archetypeId: string) => void;
 };
@@ -80,11 +89,11 @@ export function ArchetypeDetailDrawer(
         onClick={onClose}
       />
       <aside
-        className="fixed z-50 flex flex-col bg-zinc-900 shadow-xl md:right-0 md:top-0 md:h-full md:w-full md:max-w-md md:rounded-none md:border-l md:border-white/10 bottom-0 left-0 right-0 max-h-[85vh] rounded-t-2xl border-t border-white/10"
+        className={`fixed z-50 flex flex-col bg-zinc-900 shadow-xl md:right-0 md:top-0 md:h-full md:w-full md:max-w-md md:rounded-none md:border-l md:border-white/10 bottom-0 left-0 right-0 max-h-[85vh] rounded-t-2xl border-t border-white/10 ${DRAWER_SAFE_AREA_BOTTOM_CLASS}`}
         role="dialog"
         aria-label="Archetype details"
       >
-        <div className="flex flex-1 flex-col overflow-y-auto">
+        <div className="flex flex-1 flex-col overflow-y-auto overflow-x-hidden">
           {detailLegacy ? (
             <LegacyContent
               detail={detailLegacy}
@@ -129,7 +138,7 @@ export function ArchetypeDetailDrawer(
                   <button
                     type="button"
                     onClick={onClose}
-                    className="rounded p-1 text-zinc-500 hover:bg-white/10 hover:text-zinc-300"
+                    className={`rounded text-zinc-500 active:bg-white/10 focus:bg-white/10 focus:outline-none ${TOUCH_TARGET_CLASS} flex shrink-0 items-center justify-center`}
                     aria-label="Close"
                   >
                     ×
@@ -158,7 +167,7 @@ export function ArchetypeDetailDrawer(
                 </div>
               )}
 
-              {/* 3. Signals — from catalog (fixtures) */}
+              {/* 3. Signal bars — evidence; correct verbs: played/completed, own/curated, based on */}
               {catalogEntry?.signals && catalogEntry.signals.length > 0 && (
                 <div className="border-b border-white/10 p-4">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
@@ -167,8 +176,8 @@ export function ArchetypeDetailDrawer(
                   <ul className="mt-3 space-y-3">
                     {catalogEntry.signals.map((sig, i) => (
                       <li key={i} className="flex gap-3 text-sm">
-                        <span className="text-zinc-500 capitalize shrink-0">
-                          {sig.verb}
+                        <span className="text-zinc-500 shrink-0">
+                          {SIGNAL_VERB_COPY[sig.verb] ?? sig.verb}
                         </span>
                         <div className="min-w-0 flex-1">
                           <p className="font-medium text-zinc-300">{sig.label}</p>
@@ -192,19 +201,31 @@ export function ArchetypeDetailDrawer(
                 </div>
               )}
 
-              {/* 5. Evolution — placeholder */}
+              {/* 5. Evolution — trending from X → Y + compact tags */}
               <div className="border-b border-white/10 p-4">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
                   Evolution
                 </h3>
                 <p className="mt-2 text-sm text-zinc-500">
-                  We&apos;ll show how your style shifts over time once you have enough history.
+                  We&apos;ll show how your style shifts over time (e.g. you&apos;re trending from Explorer → Completionist) once you have enough history.
                 </p>
+              </div>
+
+              {/* 6. What moves the needle — 2–3 actions; verbs: play = played/completed, collector = own/curated, inference = looks like/based on */}
+              <div className="border-b border-white/10 p-4">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                  What moves the needle
+                </h3>
+                <ul className="mt-3 space-y-2 text-sm text-zinc-400">
+                  <li>Connect more platforms — <span className="text-zinc-300">based on</span> your play data.</li>
+                  <li>Add ratings or completion status — we infer from <span className="text-zinc-300">played</span> and <span className="text-zinc-300">completed</span> signals.</li>
+                  <li>Import your collection — <span className="text-zinc-300">own</span> and <span className="text-zinc-300">curated</span> lists improve archetype accuracy.</li>
+                </ul>
               </div>
 
               <div className="p-4">
                 <p className="text-xs text-zinc-600">
-                  These insights are based on your play history, connected
+                  These insights are <span className="text-zinc-500">based on</span> your play history, connected
                   platforms, and optional collection data. Ownership and play are
                   treated separately.
                 </p>
@@ -228,7 +249,7 @@ function LegacyContent({
   strengthExpanded,
   setStrengthExpanded,
 }: {
-  detail: ArchetypeDetail;
+  detail: ArchetypeDetailLegacy;
   onClose: () => void;
   onSelectBlend?: (archetypeId: string) => void;
   strengthExpanded: boolean;
@@ -282,7 +303,7 @@ function LegacyContent({
       <div className="border-b border-white/10 p-4">
         <button
           type="button"
-          onClick={() => setStrengthExpanded((e) => !e)}
+          onClick={() => setStrengthExpanded(!strengthExpanded)}
           className="flex w-full items-center justify-between text-left text-xs font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-400"
         >
           Strength breakdown
@@ -307,11 +328,11 @@ function LegacyContent({
           </ul>
         </div>
       )}
-      {detail.blends?.length > 0 && (
+      {(detail.blends?.length ?? 0) > 0 && (
         <div className="border-b border-white/10 p-4">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Often paired with</h3>
           <div className="mt-2 flex flex-wrap gap-2">
-            {detail.blends.map((blendId) => (
+            {(detail.blends ?? []).map((blendId) => (
               <button
                 key={blendId}
                 type="button"

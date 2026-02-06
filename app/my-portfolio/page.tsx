@@ -195,7 +195,7 @@ export default function MyPortfolioPage() {
                     return (
                       <img
                         src={cover}
-                        alt={rel.display_title ?? "Cover"}
+                        alt={rel?.display_title ?? "Cover"}
                         style={{
                           width: "100%",
                           height: "100%",

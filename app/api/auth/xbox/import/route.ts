@@ -34,7 +34,7 @@ export async function POST() {
     const { data: titles, error: tErr } = await supabaseUser
       .from("xbox_title_progress")
       .select(
-        "id, title_name, title_id, pf_title_id, playtime_minutes, last_played_at, release_id"
+        "id, title_name, title_id, pf_title_id, playtime_minutes, last_played_at, release_id, title_platform"
       )
       .eq("user_id", user.id)
       .order("last_played_at", { ascending: false });
@@ -106,8 +106,12 @@ export async function POST() {
           }
 
           const xboxKey = pfTitleId || titleId || null;
+          const platformLabel =
+            r.title_platform && ["Xbox 360", "Xbox One", "Xbox Series"].includes(String(r.title_platform))
+              ? String(r.title_platform)
+              : "Xbox";
 
-          // Prefer (platform_key, game_id); fallback: find by (platform_key, display_title) and attach game_id (avoid duplicate release)
+          // Prefer (platform_key, game_id); fallback: find by (platform_key, display_title, platform_label) and attach game_id (avoid duplicate release)
           const { data: existingByPlatformGame } = await supabaseAdmin
             .from("releases")
             .select("id")
@@ -123,18 +127,20 @@ export async function POST() {
                 .update({
                   xbox_title_id: xboxKey,
                   display_title: title,
+                  platform_label: platformLabel,
                   cover_url: xboxFallbackCover(xboxKey),
                   updated_at: new Date().toISOString(),
                 })
                 .eq("id", releaseId);
             }
           } else {
-            // Fallback: existing release by (platform_key, display_title) — attach game_id
+            // Fallback: existing release by (platform_key, display_title, platform_label) — attach game_id
             const { data: existingByTitle } = await supabaseAdmin
               .from("releases")
               .select("id")
               .eq("platform_key", slugPlatformKey())
               .eq("display_title", title.trim())
+              .eq("platform_label", platformLabel)
               .maybeSingle();
 
             if (existingByTitle?.id) {
@@ -145,6 +151,7 @@ export async function POST() {
                   game_id: gameId,
                   xbox_title_id: xboxKey,
                   display_title: title,
+                  platform_label: platformLabel,
                   cover_url: xboxFallbackCover(xboxKey),
                   updated_at: new Date().toISOString(),
                 })
@@ -157,6 +164,7 @@ export async function POST() {
                   display_title: title,
                   platform_name: "Xbox",
                   platform_key: slugPlatformKey(),
+                  platform_label: platformLabel,
                   xbox_title_id: xboxKey,
                   cover_url: xboxFallbackCover(xboxKey),
                 })
@@ -225,6 +233,7 @@ export async function POST() {
             .eq("id", gameId)
             .maybeSingle();
           if (!gameRow?.igdb_game_id) {
+            const cleanedForIgdb = cleanTitleForXboxIgdb(title);
             const hit = await igdbSearchBest(cleanedForIgdb, { rawTitle: title });
             if (hit?.igdb_game_id && gameId) {
               await supabaseAdmin

@@ -203,6 +203,8 @@ export async function POST() {
           }
         }
 
+        if (!releaseId) continue;
+
         await supabaseAdmin
           .from("release_external_ids")
           .upsert(releaseExternalIdRow(releaseId, "steam", steamExternalId), {

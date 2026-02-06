@@ -101,7 +101,7 @@ export async function getUserStats(
   let totalReleases = 0;
   const releaseIds: string[] = [];
 
-  for (const r of (rows ?? []) as PortfolioRow[]) {
+  for (const r of (rows ?? []) as unknown as PortfolioRow[]) {
     const rel = r?.releases;
     if (!rel?.id) continue;
 

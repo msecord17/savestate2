@@ -3,7 +3,7 @@
  * Source of truth: lib/identity/archetype-drawer-fixtures.json
  */
 
-import type { ArchetypeFixture } from "@/lib/identity/types";
+import type { ArchetypeFixture } from "@/lib/identity/types-legacy";
 import {
   archetypeFixtures as rawFixtures,
   getArchetypeFixture as getFixture,

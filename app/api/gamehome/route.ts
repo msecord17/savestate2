@@ -10,6 +10,7 @@ type ReleaseCard = {
   platform_name: string | null;
   platform_label: string | null;
   cover_url: string | null;
+  first_release_year: number | null;
 
   status: string;
 
@@ -43,6 +44,7 @@ type GameCard = {
   title: string;
   cover_url: string | null;
   status: string;
+  first_release_year: number | null;
 
   steam_playtime_minutes: number;
   psn_playtime_minutes: number | null;
@@ -191,11 +193,19 @@ function reduceToGameCards(releaseCards: ReleaseCard[], gameCoversByGameId: Map<
       }
     }
 
+    const first_release_year =
+      rels.reduce((min, r) => {
+        const y = r.first_release_year ?? null;
+        if (y == null) return min;
+        return min == null ? y : Math.min(min, y);
+      }, null as number | null);
+
     out.push({
       game_id,
       title,
       cover_url,
       status,
+      first_release_year,
 
       steam_playtime_minutes,
       psn_playtime_minutes,
@@ -229,6 +239,8 @@ export async function GET(req: Request) {
   if (!userRes?.user) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
   const user = userRes.user;
 
+  // Identity is loaded by the client from GET /api/identity/summary.
+
   const url = new URL(req.url);
   const mode = url.searchParams.get("mode") || "game";
   const cursorParam = url.searchParams.get("cursor") ?? "";
@@ -252,7 +264,8 @@ export async function GET(req: Request) {
         cover_url,
         games:game_id (
           id,
-          cover_url
+          cover_url,
+          first_release_year
         )
       )
     `
@@ -369,9 +382,13 @@ export async function GET(req: Request) {
 
       const gameCover = (rel as any)?.games?.cover_url ?? null;
       const releaseCover = rel.cover_url ?? null;
+      const first_release_year =
+        (rel as any)?.games?.first_release_year != null
+          ? Number((rel as any).games.first_release_year)
+          : null;
       // Cover precedence: game.cover_url (IGDB canonical) first, then release, then psn icon
       const cover_url = gameCover ?? releaseCover ?? psn?.title_icon_url ?? null;
-      
+
       return {
         release_id: rid,
         game_id: rel.game_id ?? null,
@@ -380,6 +397,7 @@ export async function GET(req: Request) {
         platform_name: rel.platform_name ?? null,
         platform_label: rel.platform_label ?? null,
         cover_url,
+        first_release_year,
 
         status: String(r?.status ?? "owned"),
         steam_playtime_minutes: steamMinutes,
@@ -412,6 +430,7 @@ export async function GET(req: Request) {
       ok: true,
       mode,
       total: releaseCards.length,
+      items: releaseCards,
       cards: releaseCards,
       next_cursor: nextCursor,
       has_more: hasMore,
@@ -421,10 +440,13 @@ export async function GET(req: Request) {
   // Build map of game_id -> game.cover_url for fallback in reduceToGameCards
   const gameCoversByGameId = new Map<string, string | null>();
   for (const r of pageRows) {
-    const rel = r?.releases;
-    if (rel?.game_id && (rel as any)?.games?.cover_url) {
+    const rel = (Array.isArray(r?.releases) ? r.releases[0] : r?.releases) as
+      | { game_id?: string; games?: { cover_url?: string } }
+      | null
+      | undefined;
+    if (rel?.game_id && rel?.games?.cover_url) {
       const gameId = String(rel.game_id);
-      const gameCover = (rel as any).games.cover_url;
+      const gameCover = rel.games.cover_url;
       if (!gameCoversByGameId.has(gameId)) {
         gameCoversByGameId.set(gameId, gameCover);
       }
@@ -436,6 +458,7 @@ export async function GET(req: Request) {
     ok: true,
     mode,
     total: gameCards.length,
+    items: gameCards,
     cards: gameCards,
     next_cursor: nextCursor,
     has_more: hasMore,

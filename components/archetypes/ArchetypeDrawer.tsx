@@ -264,13 +264,13 @@ export function ArchetypeDrawer({
               )}
 
               {/* Signals used — fixture copy (explanation, when fixture exists) */}
-              {fixture?.signals?.length > 0 && (
+              {(fixture?.signals?.length ?? 0) > 0 && (
                 <div className="border-b border-white/10 p-4">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
                     Signals used
                   </h3>
                   <ul className="mt-3 space-y-3">
-                    {fixture.signals.map((sig, i) => (
+                    {(fixture?.signals ?? []).map((sig, i) => (
                       <li key={i} className="flex gap-3 text-sm">
                         <span className="text-zinc-500">
                           {CONFIDENCE_LABELS[sig.confidence] ?? sig.confidence}

@@ -1,14 +1,85 @@
 "use client";
 
+import * as React from "react";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import ProgressBlock, { type ProgressSignal } from "@/components/progress/ProgressBlock";
-import { ArchetypeDetailDrawer } from "@/components/ArchetypeDetailDrawer";
-import { buildPayloadFromArchetypes } from "@/lib/archetypes/build-payload";
-import { getArchetypeCatalogEntry } from "@/lib/archetypes/catalog";
-import type { ArchetypeScore } from "@/lib/archetypes/score";
-import type { ArchetypesPayload } from "@/lib/archetypes/insights-types";
 import { resolveCoverUrl } from "@/lib/images/resolveCoverUrl";
+import { IdentityStrip } from "@/app/components/identity/IdentityStrip";
+import { EraTimeline, ERA_LABELS, ERA_YEARS } from "@/components/identity/EraTimeline";
+import { TopSignalsRow } from "@/app/components/identity/TopSignalsRow";
+import { EvolutionLine } from "@/app/components/identity/EvolutionLine";
+import { ArchetypeDrawer } from "@/app/components/identity/ArchetypeDrawer";
+import { EraDetailDrawer } from "@/app/components/identity/EraDetailDrawer";
+import type { IdentitySummaryApiResponse } from "@/lib/identity/types";
+import { ARCHETYPE_THEME, ERA_THEME, STRENGTH_LABELS } from "@/lib/identity/strip-themes";
+import type { IdentitySignal } from "@/lib/identity/types";
+import {
+  UserRound,
+  Compass,
+  CheckCircle2,
+  Waves,
+  Gamepad,
+  Gamepad2,
+  Disc,
+  Disc3,
+  Joystick,
+  Sparkles,
+  Monitor,
+  Trophy,
+  Anchor,
+  ArrowUpRight,
+  Layers,
+  Bookmark,
+  Sprout,
+  Archive,
+  Clock,
+  type LucideIcon,
+} from "lucide-react";
+import { fetchGameHome, fetchIdentitySummary } from "@/src/core/api";
+import { motion, useReducedMotion } from "framer-motion";
+
+const ICON_MAP: Record<string, LucideIcon> = {
+  UserRound,
+  Compass,
+  CheckCircle2,
+  Waves,
+  Gamepad,
+  Gamepad2,
+  Disc,
+  Disc3,
+  Joystick,
+  Sparkles,
+  Monitor,
+  Trophy,
+  Archive,
+  Clock,
+  Layers,
+  Playstation: Gamepad2, // lucide has no Playstation; use Gamepad2
+};
+
+function iconFor(name: string): React.ReactNode {
+  const Icon = ICON_MAP[name] ?? UserRound;
+  return <Icon className="h-4 w-4" />;
+}
+
+const EVOLUTION_ICON_MAP: Record<string, LucideIcon> = {
+  checkCircle: CheckCircle2,
+  compass: Compass,
+  sparkles: Sparkles,
+  anchor: Anchor,
+  arrowUpRight: ArrowUpRight,
+  layers: Layers,
+  bookmark: Bookmark,
+  seedling: Sprout,
+};
+
+function evolutionIconFor(iconKey: string): React.ReactNode {
+  const Icon = EVOLUTION_ICON_MAP[iconKey] ?? Sparkles;
+  return <Icon className="h-4 w-4" />;
+}
+
+import { tokens } from "@/src/design";
 
 type Card = {
   // game mode
@@ -42,12 +113,30 @@ type Card = {
 
   sources: string[];
   lastSignalAt: string | null;
+
+  /** First release year (game or release); used for era filter. */
+  first_release_year?: number | null;
 };
 
 function minutesToHours(min: number) {
   const h = Math.round((min / 60) * 10) / 10;
   if (!isFinite(h) || h <= 0) return "0h";
   return `${h}h`;
+}
+
+/** Era bucket from release year; same mapping as get_identity_signals SQL. */
+function eraBucketFromYear(y?: number | null): string {
+  if (y == null || !Number.isFinite(y)) return "unknown";
+  if (y <= 1979) return "early_arcade_pre_crash";
+  if (y >= 1980 && y <= 1989) return "8bit_home";
+  if (y >= 1990 && y <= 1995) return "16bit";
+  if (y >= 1996 && y <= 2000) return "32_64bit";
+  if (y >= 2001 && y <= 2005) return "ps2_xbox_gc";
+  if (y >= 2006 && y <= 2012) return "hd_era";
+  if (y >= 2013 && y <= 2016) return "ps4_xbo";
+  if (y >= 2017 && y <= 2019) return "switch_wave";
+  if (y >= 2020) return "modern";
+  return "unknown";
 }
 
 function timeAgo(iso: string | null) {
@@ -156,52 +245,90 @@ export default function GameHomePage() {
   const [updatedRecently, setUpdatedRecently] = useState<boolean>(false);
   const [sort, setSort] = useState<"recent" | "title">("recent");
   const [splitByPlatform, setSplitByPlatform] = useState<boolean>(false);
+  const [eraFilter, setEraFilter] = useState<string | null>(null);
+  const [eraDrawerOpen, setEraDrawerOpen] = useState(false);
+  const toggleEra = (era: string) => {
+    setEraFilter((prev) => {
+      const next = prev === era ? null : era;
+      setEraDrawerOpen(next !== null);
+      return next;
+    });
+  };
 
-  // Identity strip + drawer: from GET /api/insights/archetypes (payload.archetypes, insight)
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerKey, setDrawerKey] = useState<string | null>(null);
-  const [insightsPayload, setInsightsPayload] = useState<{
-    archetypes?: { top: ArchetypeScore[]; primary_era?: string | null; primary_archetype?: string | null };
-  } | null>(null);
-  const [archetypePayload, setArchetypePayload] = useState<ArchetypesPayload | null>(null);
-  const [insight, setInsight] = useState<{ headline: string; subline: string; compact_tag: string } | null>(null);
+  /** Identity from GET /api/identity/summary — computed archetypes (lib/identity/archetypes.ts), not fixtures. */
+  const [identitySummary, setIdentitySummary] = useState<IdentitySummaryApiResponse | null>(null);
+  /** Keys of cards just loaded (for fade-up animation on pagination). Cleared after ~500ms. */
+  const [newCardKeys, setNewCardKeys] = useState<Set<string>>(new Set());
+  const reducedMotion = useReducedMotion();
 
-  function openArchetypeDrawer(key: string) {
-    setDrawerKey(key);
-    setDrawerOpen(true);
-  }
-
-  async function loadArchetypes() {
-    try {
-      const base = typeof window !== "undefined" ? "" : (process.env.NEXT_PUBLIC_BASE_URL ?? "");
-      const res = await fetch(`${base}/api/insights/archetypes`, { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data?.ok || !data.payload) return;
-      const p = data.payload;
-      if (p.archetypes != null) {
-        setInsightsPayload({
-          archetypes: {
-            ...p.archetypes,
-            primary_era: p.archetypes.primary_era ?? null,
-            primary_archetype: p.archetypes.primary_archetype ?? null,
-          },
-        });
-        setArchetypePayload(buildPayloadFromArchetypes(p.archetypes));
-      } else {
-        setArchetypePayload(p as ArchetypesPayload);
-      }
-      if (data.insight && typeof data.insight === "object") {
-        setInsight({
-          headline: data.insight.headline ?? "",
-          subline: data.insight.subline ?? "",
-          compact_tag: data.insight.compact_tag ?? "",
-        });
-      }
-    } catch {
-      // ignore; drawer falls back to fixture-only
+  const identityChips = useMemo(() => {
+    const prim = identitySummary?.primary_archetype;
+    const era = identitySummary?.era_affinity;
+    if (identitySummary && prim && era) {
+      const eraTheme = ERA_THEME[era.key];
+      const archTheme = ARCHETYPE_THEME[prim.key];
+      const archIcon = archTheme?.icon ?? prim.icon;
+      const archLabel = archTheme?.shortLabel ?? prim.name;
+      return [
+        {
+          key: "arch",
+          label: archLabel,
+          sub: STRENGTH_LABELS[prim.strength],
+          icon: iconFor(archIcon),
+          kind: "archetype" as const,
+          tier: prim.strength,
+        },
+        {
+          key: "era",
+          label: eraTheme?.label ?? era.name,
+          sub: era.one_liner,
+          icon: iconFor(eraTheme?.icon ?? era.icon),
+          kind: "era" as const,
+          eraKey: era.key,
+        },
+        ...(identitySummary?.evolution
+          ? [
+              {
+                key: "evo",
+                label: identitySummary.evolution?.tag ?? "",
+                sub: identitySummary.evolution?.note ?? "",
+                icon: iconFor("Sparkles"),
+                kind: "evolution" as const,
+              },
+            ]
+          : []),
+      ];
     }
-  }
+    return [
+      {
+        key: "loading1",
+        label: "Loading…",
+        sub: " ",
+        disabled: true,
+      },
+    ];
+  }, [identitySummary]);
+
+  /** Top signals (max 5) from summary for the row; convert to IdentitySignal for drawer compatibility. */
+  const topSignalsDetail = useMemo(() => {
+    if (!identitySummary?.top_signals?.length) return null;
+    const sourceFor = (key: string): IdentitySignal["source"] => {
+      if (key === "ownership" || key === "curation") return key;
+      if (key === "play_evidence" || key === "completion") return "play";
+      return "time";
+    };
+    const signals: IdentitySignal[] = identitySummary.top_signals.map((s) => ({
+      key: s.key,
+      label: s.label,
+      value: s.value,
+      source: sourceFor(s.key),
+      note: s.note,
+    }));
+    return { signals };
+  }, [identitySummary]);
+
+  const evo = identitySummary?.evolution ?? null;
 
   async function load(cursor?: string | null) {
     const isAppend = Boolean(cursor);
@@ -210,25 +337,21 @@ export default function GameHomePage() {
     setErr("");
     try {
       const mode = splitByPlatform ? "release" : "game";
-      const url = cursor
-        ? `/api/gamehome?mode=${mode}&cursor=${encodeURIComponent(cursor)}`
-        : `/api/gamehome?mode=${mode}`;
-      const res = await fetch(url, { cache: "no-store" });
-      const text = await res.text();
-      if (text.trim().startsWith("<")) throw new Error("Server returned HTML (auth redirect?)");
-      const data = text ? JSON.parse(text) : null;
-      if (!res.ok) throw new Error(data?.error || `Failed (${res.status})`);
-
-      const arr = Array.isArray(data?.cards) ? data.cards : [];
+      const { items, next_cursor, has_more } = await fetchGameHome(mode, cursor ?? null);
       if (isAppend) {
-        setCards((prev) => [...prev, ...arr]);
+        setCards((prev) => [...prev, ...(items as Card[])]);
+        const keys = new Set(
+          (items as any[]).map((i) => String(i.game_id ?? i.release_id ?? "")).filter(Boolean)
+        );
+        setNewCardKeys(keys);
       } else {
-        setCards(arr);
+        setCards(items as Card[]);
+        setNewCardKeys(new Set());
       }
-      setNextCursor(data?.next_cursor ?? null);
-      setHasMore(Boolean(data?.has_more));
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load");
+      setNextCursor(next_cursor);
+      setHasMore(has_more);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Failed to load");
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -245,8 +368,22 @@ export default function GameHomePage() {
   }, [splitByPlatform]);
 
   useEffect(() => {
-    loadArchetypes();
+    let cancelled = false;
+    fetchIdentitySummary()
+      .then((data) => {
+        if (!cancelled && data) setIdentitySummary(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (newCardKeys.size === 0) return;
+    const t = setTimeout(() => setNewCardKeys(new Set()), 500);
+    return () => clearTimeout(t);
+  }, [newCardKeys]);
 
   const platforms = useMemo(() => {
     const set = new Set<string>();
@@ -328,6 +465,10 @@ export default function GameHomePage() {
       out = out.filter((c) => String(c.status || "owned") === status);
     }
 
+    if (eraFilter) {
+      out = out.filter((c) => eraBucketFromYear(c.first_release_year) === eraFilter);
+    }
+
     if (updatedRecently) {
       out = out.filter((c) => {
         if (!c.lastSignalAt) return false;
@@ -347,7 +488,17 @@ export default function GameHomePage() {
     }
 
     return out;
-  }, [cards, platform, source, status, updatedRecently, sort]);
+  }, [cards, platform, source, status, eraFilter, updatedRecently, sort]);
+
+  const eraDetailNotableGames = useMemo(() => {
+    if (!eraFilter) return [];
+    return filtered
+      .slice(0, 5)
+      .map((c) => ({
+        title: c.title,
+        platform: c.platform_label || c.platform_name || c.platform_key || null,
+      }));
+  }, [eraFilter, filtered]);
 
   return (
     <div style={{ padding: 20, maxWidth: 1400, margin: "0 auto" }}>
@@ -371,100 +522,55 @@ export default function GameHomePage() {
           </div>
         ) : null}
 
-        {/* Identity strip: era chip + archetype chip + blended insight line; chips open drawer */}
-        <section style={{ marginBottom: 20 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 10 }}>
-            Your style
-          </h2>
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
-            {insightsPayload?.archetypes?.primary_era && (
-              <button
-                type="button"
-                onClick={() => openArchetypeDrawer(`era_${insightsPayload.archetypes.primary_era}`)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "8px 14px",
-                  borderRadius: 999,
-                  border: "1px solid #e5e7eb",
-                  background: "var(--archetype-era, #34d399)",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  color: "#0f172a",
-                  cursor: "pointer",
-                }}
-              >
-                {getArchetypeCatalogEntry(`era_${insightsPayload.archetypes.primary_era}`)?.label ?? insightsPayload.archetypes.primary_era}
-              </button>
-            )}
-            {insightsPayload?.archetypes?.primary_archetype && (
-              <button
-                type="button"
-                onClick={() => openArchetypeDrawer(insightsPayload.archetypes!.primary_archetype!)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "8px 14px",
-                  borderRadius: 999,
-                  border: "1px solid #e5e7eb",
-                  background: getArchetypeCatalogEntry(insightsPayload.archetypes!.primary_archetype!)?.color_token ?? "#f8fafc",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  color: "#0f172a",
-                  cursor: "pointer",
-                }}
-              >
-                {getArchetypeCatalogEntry(insightsPayload.archetypes!.primary_archetype!)?.label ?? insightsPayload.archetypes!.primary_archetype}
-              </button>
-            )}
-            {(insightsPayload?.archetypes?.top ?? []).map((a) =>
-              a.key !== insightsPayload?.archetypes?.primary_archetype ? (
-                <button
-                  key={a.key}
-                  type="button"
-                  onClick={() => openArchetypeDrawer(a.key)}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "8px 14px",
-                    borderRadius: 999,
-                    border: "1px solid #e5e7eb",
-                    background: "#f8fafc",
-                    fontSize: 13,
-                    fontWeight: 700,
-                    color: "#0f172a",
-                    cursor: "pointer",
-                  }}
-                >
-                  {a.tier && (
-                    <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#64748b" }}>
-                      {a.tier === "core" ? "Core" : a.tier === "strong" ? "Strong" : "Emerging"} ·{" "}
-                    </span>
-                  )}
-                  {a.name}
-                </button>
-              ) : null
-            )}
+        <IdentityStrip chips={identityChips} onOpenDrawer={() => setDrawerOpen(true)} />
+        <div className="px-4">
+          <EraTimeline
+            eraBuckets={
+              identitySummary?.identity_signals?.era_buckets ??
+              identitySummary?.era_buckets ??
+              undefined
+            }
+            selectedEra={eraFilter}
+            onSelectEra={toggleEra}
+          />
+        </div>
+        <TopSignalsRow
+          detail={topSignalsDetail}
+          onOpenDrawer={() => setDrawerOpen(true)}
+        />
+        {evo ? (
+          <div className="px-4">
+            <EvolutionLine
+              tag={evo.tag}
+              icon={evolutionIconFor(evo.icon)}
+              subtle
+            />
           </div>
-          {insight && (insight.headline || insight.subline || insight.compact_tag) && (
-            <p style={{ marginTop: 10, fontSize: 14, color: "#64748b" }}>
-              {insight.headline && <strong style={{ color: "#0f172a" }}>{insight.headline}</strong>}
-              {insight.subline && ` · ${insight.subline}`}
-              {insight.compact_tag && (
-                <span style={{ marginLeft: 8, fontSize: 12, color: "#94a3b8" }}>{insight.compact_tag}</span>
-              )}
-            </p>
-          )}
-        </section>
+        ) : null}
 
-        <ArchetypeDetailDrawer
+        <ArchetypeDrawer
           open={drawerOpen}
-          onClose={() => setDrawerOpen(false)}
-          archetypeKey={drawerKey}
-          archetypesTop={insightsPayload?.archetypes?.top ?? []}
+          onOpenChange={setDrawerOpen}
+          detail={identitySummary?.drawer ?? null}
+          evolution={evo}
+          primaryEra={identitySummary?.era_affinity?.key}
+        />
+
+        <EraDetailDrawer
+          open={eraDrawerOpen}
+          onOpenChange={setEraDrawerOpen}
+          eraKey={eraFilter}
+          eraLabel={eraFilter ? (ERA_LABELS[eraFilter] ?? eraFilter) : ""}
+          eraYears={eraFilter ? (ERA_YEARS[eraFilter] ?? "—") : "—"}
+          interpretation="This era holds a strong place in your library. You collect across platforms and editions."
+          signalChips={["Library depth", "Era focus", "Multi-platform"]}
+          notableGames={eraDetailNotableGames}
+          archetypeSnapshot={
+            identitySummary?.primary_archetype
+              ? `Your collection in this era reflects your ${identitySummary.primary_archetype.name} tendencies.`
+              : "Your profile in this era will appear as you connect platforms and add games."
+          }
+          primaryArchetypeKey={identitySummary?.primary_archetype?.key}
         />
 
         {loading ? (
@@ -845,10 +951,21 @@ export default function GameHomePage() {
                   ? (c.release_id ?? `${c.title}-${idx}`)
                   : (c.game_id ?? c.release_id ?? `${c.title}-${idx}`);
                 const uniqueKey = `${baseKey}-${idx}`;
+                const isNewCard = newCardKeys.has(String(baseKey));
 
                 return (
-                  <div
+                  <motion.div
                     key={uniqueKey}
+                    initial={
+                      isNewCard && !reducedMotion
+                        ? { opacity: 0, y: 6 }
+                        : false
+                    }
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.18 }}
+                    whileHover={
+                      reducedMotion ? undefined : { y: -2, transition: { duration: 0.12 } }
+                    }
                     style={{
                       border: "1px solid #e5e7eb",
                       borderRadius: 8,
@@ -1009,7 +1126,7 @@ export default function GameHomePage() {
                         return <ProgressBlock signals={signals} />;
                       })()}
                     </div>
-                  </div>
+                  </motion.div>
                 );
               })}
             </div>
@@ -1021,13 +1138,15 @@ export default function GameHomePage() {
                   onClick={loadMore}
                   disabled={loadingMore}
                   style={{
+                    minHeight: tokens.touchTargetMin,
+                    minWidth: tokens.touchTargetMin,
                     padding: "10px 20px",
                     borderRadius: 12,
-                    border: "1px solid #e5e7eb",
-                    background: "white",
+                    border: "1px solid var(--color-border)",
+                    background: "var(--color-surface)",
                     fontWeight: 700,
                     cursor: loadingMore ? "not-allowed" : "pointer",
-                    color: "#0f172a",
+                    color: "var(--color-text)",
                   }}
                 >
                   {loadingMore ? "Loading…" : "Show more"}

@@ -1,9 +1,9 @@
 import type {
-  ArchetypeDetail,
+  ArchetypeDetailLegacy,
   ArchetypeDetailSignal,
   ArchetypeFixture,
   ArchetypeDrawerFixtures,
-} from "./types";
+} from "./types-legacy";
 
 import fixturesJson from "./archetype-drawer-fixtures.json";
 
@@ -41,7 +41,7 @@ function signalTypeFromLabel(label: string): "play" | "ownership" | "time" | "cu
 export function fixtureToDetail(
   fixture: ArchetypeFixture,
   strengthTier: "emerging" | "strong" | "core"
-): ArchetypeDetail {
+): ArchetypeDetailLegacy {
   const signals: ArchetypeDetailSignal[] = fixture.signals.map((s) => ({
     type: signalTypeFromLabel(s.label),
     label: s.label,
@@ -70,7 +70,7 @@ export function fixtureToDetail(
 export function getArchetypeDetail(
   key: string,
   strengthTier: "emerging" | "strong" | "core"
-): ArchetypeDetail | null {
+): ArchetypeDetailLegacy | null {
   const fixture = getArchetypeFixture(key);
   if (!fixture) return null;
   return fixtureToDetail(fixture, strengthTier);

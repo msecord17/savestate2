@@ -215,6 +215,11 @@ export async function POST() {
       }
     }
 
+    if (!releaseId) {
+      skipped += 1;
+      continue;
+    }
+
     // ✅ After creating/finding release, upsert the external-id mapping (idempotent)
     await supabaseAdmin
       .from("release_external_ids")

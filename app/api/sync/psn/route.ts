@@ -180,12 +180,15 @@ async function mergeUpsertPsnTitle(
  * (0) Lookup mapping first and return if exists; (1) resolve game_id; (2) find by (platform_key, game_id);
  * (3) insert with 23505 race handling; (4) upsert mapping (ignoreDuplicates); if mapped release_id differs, merge and use mapped.
  */
-async function ensureReleaseForPsnTitle(opts: {
-  admin: any;
-  titleName: string;
-  psnExternalId: string; // real npCommunicationId/titleId OR synthetic id
-  platformLabel: string; // PS5/PS4/...
-}) {
+async function ensureReleaseForPsnTitle(
+  opts: {
+    admin: any;
+    titleName: string;
+    psnExternalId: string; // real npCommunicationId/titleId OR synthetic id
+    platformLabel: string; // PS5/PS4/...
+  },
+  retried23505?: boolean
+): Promise<string> {
   const { admin, titleName, psnExternalId, platformLabel } = opts;
 
   // (0) Anchor: lookup release_external_ids(source='psn', external_id) and return if exists
@@ -236,15 +239,28 @@ async function ensureReleaseForPsnTitle(opts: {
     if (rErr) {
       const code = (rErr as { code?: string })?.code;
       if (code === "23505") {
-        // Unique violation on (platform_key, game_id): another insert won the race
-        const { data: raced, error: raceErr } = await admin
-          .from("releases")
-          .select("id")
-          .eq("platform_key", "psn")
-          .eq("game_id", gameId)
-          .maybeSingle();
-        if (raceErr || !raced?.id) throw new Error(`release race lookup failed: ${raceErr?.message || "no row"}`);
-        releaseId = String(raced.id);
+        // Unique violation on (platform_key, game_id): another insert won the race. Re-query for the row (it may not be visible immediately).
+        async function findExistingRelease(): Promise<{ id: string } | null> {
+          const { data, error } = await admin
+            .from("releases")
+            .select("id")
+            .eq("platform_key", "psn")
+            .eq("game_id", gameId)
+            .maybeSingle();
+          if (error) throw new Error(`release race lookup: ${error.message}`);
+          return data?.id ? { id: String(data.id) } : null;
+        }
+        let raced = await findExistingRelease();
+        if (!raced) {
+          await new Promise((r) => setTimeout(r, 150));
+          raced = await findExistingRelease();
+        }
+        if (!raced) {
+          // One full retry from step (0): mapping or row may be visible now
+          if (!retried23505) return ensureReleaseForPsnTitle(opts, true);
+          throw new Error(`release race lookup failed: no row for (psn, ${gameId}) after 23505`);
+        }
+        releaseId = raced.id;
       } else {
         throw new Error(`Failed to insert release: ${rErr.message}`);
       }

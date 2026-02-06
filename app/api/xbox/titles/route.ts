@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 
+/** Stable label for release.platform_label and xbox_title_progress.title_platform (used for played-on generation). */
+export type XboxPlatformLabel = "Xbox 360" | "Xbox One" | "Xbox Series";
+
 type TitleOut = {
   name: string;
   titleId?: string;
   pfTitleId?: string;
   devices?: string[];
+  /** Resolved generation: Xbox 360 | Xbox One | Xbox Series. From contract version + devices when available. */
+  platform_label?: XboxPlatformLabel;
   achievements_earned?: number;
   achievements_total?: number;
   gamerscore_earned?: number;
@@ -30,6 +35,24 @@ function isoOrNull(v: any): string | null {
   } catch {
     return null;
   }
+}
+
+/** Derive stable platform label from API source + raw title (devices/platform). */
+function xboxPlatformLabelFromRaw(t: any): XboxPlatformLabel {
+  const source = t?._sourcePlatform as string | undefined;
+  if (source === "Xbox 360") return "Xbox 360";
+
+  // Contract v2 = One/Series; try to distinguish via devices or platform
+  const devices = Array.isArray(t?.devices) ? t.devices as string[] : [];
+  const platformStr = [t?.platform, t?.titlePlatform, t?.platformId, ...devices]
+    .filter(Boolean)
+    .map((s: any) => String(s).toLowerCase())
+    .join(" ");
+  if (/\bseries\b|xboxseries|gen9/.test(platformStr)) return "Xbox Series";
+  if (/\bone\b|xboxone|gen8/.test(platformStr)) return "Xbox One";
+
+  // Default for v2 when no devices/platform: treat as Xbox One (most common)
+  return "Xbox One";
 }
 
 // 1) XBL user.authenticate
@@ -231,15 +254,27 @@ async function fetchAchievementHistoryTitles(authorization: string, xuid: string
       fullJsonSample: JSON.stringify(json).slice(0, 2000), // First 2000 chars of full response
     };
     
-    if (pageCount === 1) {
-      // Store first page debug for this platform
+    if (pageCount === 1 && pageTitles.length > 0) {
+      // Store first page debug + one raw title sample (to find One vs Series fields)
+      platformDebugs.push({
+        ...debugInfo,
+        rawTitleSample: pageTitles[0],
+        rawTitleSampleKeys: pageTitles[0] ? Object.keys(pageTitles[0]) : [],
+      });
+      console.log(`[Xbox ${platform.name}] Page 1 raw title sample (for platform_label):`, JSON.stringify(pageTitles[0]).slice(0, 800));
+    } else if (pageCount === 1) {
       platformDebugs.push(debugInfo);
-      console.log(`[Xbox ${platform.name}] Page ${pageCount} response structure:`, JSON.stringify(debugInfo, null, 2));
     }
 
-    // Add titles from this page
+    // Add titles from this page; tag each with source platform for generation (360 vs One/Series)
     const pageTitles = Array.isArray(json?.titles) ? json.titles : [];
-    allTitles.push(...pageTitles);
+    for (const raw of pageTitles) {
+      allTitles.push({
+        ...raw,
+        _sourcePlatform: platform.name,
+        _sourceContractVersion: platform.version,
+      });
+    }
     platformTitlesCount += pageTitles.length;
 
     // Check for continuation token (can be in different locations)
@@ -425,6 +460,7 @@ export async function GET() {
       titleId,
       pfTitleId: titleId, // keep compatibility with your earlier model
       devices: Array.isArray(t?.devices) ? t.devices : undefined,
+      platform_label: xboxPlatformLabelFromRaw(t),
       achievements_earned: achievementsEarned,
       achievements_total: achievementsTotal,
       gamerscore_earned: gamerscoreEarned,
@@ -445,7 +481,12 @@ export async function GET() {
       titlesWithGamerscore: titles.filter((t) => (t.gamerscore_total ?? 0) > 0).length,
       rawTitlesCount: hist.titles.length,
       titleNames: titles.map((t) => t.name).slice(0, 10), // First 10 for debugging
-      fetchDebug: hist.debug, // Include pagination debug info
+      platformLabelCounts: {
+        "Xbox 360": titles.filter((t) => t.platform_label === "Xbox 360").length,
+        "Xbox One": titles.filter((t) => t.platform_label === "Xbox One").length,
+        "Xbox Series": titles.filter((t) => t.platform_label === "Xbox Series").length,
+      },
+      fetchDebug: hist.debug, // Include pagination debug info (includes rawTitleSample per platform)
     },
   });
 }
