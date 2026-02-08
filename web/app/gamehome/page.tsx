@@ -246,11 +246,38 @@ export default function GameHomePage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   /** Identity from GET /api/identity/summary — computed archetypes (lib/identity/archetypes.ts), not fixtures. */
   const [identitySummary, setIdentitySummary] = useState<IdentitySummaryApiResponse | null>(null);
+  /** True once the identity summary fetch has settled (success or failure). Used to show "Identity couldn't load" on hosted when API fails. */
+  const [identityLoadDone, setIdentityLoadDone] = useState(false);
+  /** HTTP status when identity summary fetch failed (401, 500, etc.) so we can show a hint. */
+  const [identityErrorStatus, setIdentityErrorStatus] = useState<number | null>(null);
+  /** Request aborted due to timeout so we can show "Request timed out". */
+  const [identityTimedOut, setIdentityTimedOut] = useState(false);
+  /** Increment to re-run identity summary fetch (e.g. after Retry). */
+  const [identityRetryKey, setIdentityRetryKey] = useState(0);
   /** Keys of cards just loaded (for fade-up animation on pagination). Cleared after ~500ms. */
   const [newCardKeys, setNewCardKeys] = useState<Set<string>>(new Set());
   const reducedMotion = useReducedMotion();
 
   const identityChips = useMemo(() => {
+    if (identityLoadDone && !identitySummary) {
+      const sub = identityTimedOut
+        ? "Request timed out"
+        : identityErrorStatus === 401
+          ? "Log in on this site"
+          : identityErrorStatus === 500
+            ? "Server env or DB issue"
+            : identityErrorStatus != null
+              ? `Error ${identityErrorStatus}`
+              : "Check login and network";
+      return [
+        {
+          key: "identity-failed",
+          label: "Identity couldn't load",
+          sub,
+          disabled: true,
+        },
+      ];
+    }
     const prim = identitySummary?.primary_archetype;
     const era = identitySummary?.era_affinity;
     if (identitySummary && prim && era) {
@@ -296,7 +323,7 @@ export default function GameHomePage() {
         disabled: true,
       },
     ];
-  }, [identitySummary]);
+  }, [identitySummary, identityLoadDone, identityErrorStatus, identityTimedOut]);
 
   /** Top signals (max 5) from summary for the row; convert to IdentitySignal for drawer compatibility. */
   const topSignalsDetail = useMemo(() => {
@@ -356,16 +383,30 @@ export default function GameHomePage() {
   }, [splitByPlatform]);
 
   useEffect(() => {
+    setIdentityLoadDone(false);
+    setIdentityErrorStatus(null);
+    setIdentityTimedOut(false);
     let cancelled = false;
     fetchIdentitySummary()
-      .then((data) => {
-        if (!cancelled && data) setIdentitySummary(data);
+      .then(({ data, errorStatus, timedOut }) => {
+        if (!cancelled) {
+          setIdentitySummary(data ?? null);
+          setIdentityErrorStatus(errorStatus ?? null);
+          setIdentityTimedOut(timedOut ?? false);
+          setIdentityLoadDone(true);
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) {
+          setIdentityErrorStatus(null);
+          setIdentityTimedOut(false);
+          setIdentityLoadDone(true);
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [identityRetryKey]);
 
   useEffect(() => {
     if (newCardKeys.size === 0) return;
@@ -511,6 +552,26 @@ export default function GameHomePage() {
         ) : null}
 
         <IdentityStrip chips={identityChips} onOpenDrawer={() => setDrawerOpen(true)} />
+        {identityLoadDone && !identitySummary ? (
+          <div style={{ marginTop: 8, marginLeft: 16 }}>
+            <button
+              type="button"
+              onClick={() => setIdentityRetryKey((k) => k + 1)}
+              style={{
+                padding: "6px 12px",
+                fontSize: 13,
+                fontWeight: 600,
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                background: "var(--color-surface)",
+                cursor: "pointer",
+                color: "var(--color-text)",
+              }}
+            >
+              Retry identity
+            </button>
+          </div>
+        ) : null}
         <div className="px-4">
           <EraTimeline
             eraBuckets={mergeEraBucketsByCanonical(

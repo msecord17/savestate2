@@ -1,4 +1,3 @@
-import { apiGet } from "./client";
 import type {
   IdentitySummaryApiResponse,
   TimelineResponse,
@@ -6,14 +5,45 @@ import type {
 
 export type { IdentitySummaryApiResponse, TimelineResponse };
 
-export async function fetchIdentitySummary(): Promise<IdentitySummaryApiResponse | null> {
+const getBase = (): string => {
+  if (typeof window !== "undefined") return "";
+  return process.env.NEXT_PUBLIC_BASE_URL ?? "";
+};
+
+const IDENTITY_SUMMARY_TIMEOUT_MS = 12_000;
+
+export type FetchIdentitySummaryResult = {
+  data: IdentitySummaryApiResponse | null;
+  /** Set when request failed so UI can show 401 vs 500. 0 = network/timeout/unknown. */
+  errorStatus?: number;
+  /** True when the request was aborted due to timeout (so UI can show "timed out"). */
+  timedOut?: boolean;
+};
+
+export async function fetchIdentitySummary(): Promise<FetchIdentitySummaryResult> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), IDENTITY_SUMMARY_TIMEOUT_MS);
   try {
-    const data = await apiGet<IdentitySummaryApiResponse>("/api/identity/summary", {
+    const base = getBase();
+    const res = await fetch(`${base}/api/identity/summary`, {
+      cache: "no-store",
       credentials: "include",
+      signal: controller.signal,
     });
-    return data ?? null;
-  } catch {
-    return null;
+    clearTimeout(timeoutId);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { data: null, errorStatus: res.status };
+    }
+    return { data: (data ?? null) as IdentitySummaryApiResponse | null };
+  } catch (e) {
+    clearTimeout(timeoutId);
+    const isAbort = e instanceof Error && e.name === "AbortError";
+    return {
+      data: null,
+      errorStatus: 0,
+      ...(isAbort ? { timedOut: true as const } : {}),
+    };
   }
 }
 

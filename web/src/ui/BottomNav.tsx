@@ -6,6 +6,7 @@ import { tokens } from "@/src/design";
 
 const NAV_ITEMS = [
   { href: "/gamehome", label: "Home" },
+  { href: "/timeline", label: "Timeline" },
   { href: "/my-portfolio", label: "Portfolio" },
   { href: "/profile", label: "Profile" },
   { href: "/lists", label: "Lists" },
