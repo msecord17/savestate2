@@ -583,7 +583,7 @@ limit ${limit};
    * Only overwrite when: cover is null/placeholder/known-bad AND (no images_source or images_source not igdb%).
    * If games.cover_url IS NOT NULL and images_source LIKE 'igdb%' → never overwrite.
    */
-  function shouldOverwriteCover(
+  export function shouldOverwriteCover(
     current: string | null | undefined,
     imagesSource?: string | null
   ): boolean {
