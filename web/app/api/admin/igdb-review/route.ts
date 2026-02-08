@@ -38,8 +38,25 @@ export async function POST(req: Request) {
   }
 
   const gameId = body.game_id;
-  const igdbGameId = body.igdb_game_id != null ? Number(body.igdb_game_id) : null;
-  if (!gameId || !igdbGameId || !Number.isFinite(igdbGameId)) {
+  const rawIgdb = body.igdb_game_id;
+
+  if (!gameId) {
+    return NextResponse.json(
+      { error: "Missing or invalid game_id / igdb_game_id" },
+      { status: 400 }
+    );
+  }
+
+  if (rawIgdb == null) {
+    return NextResponse.json(
+      { error: "Missing or invalid game_id / igdb_game_id" },
+      { status: 400 }
+    );
+  }
+
+  const igdbGameId = Number(rawIgdb);
+
+  if (!Number.isFinite(igdbGameId) || igdbGameId <= 0) {
     return NextResponse.json(
       { error: "Missing or invalid game_id / igdb_game_id" },
       { status: 400 }

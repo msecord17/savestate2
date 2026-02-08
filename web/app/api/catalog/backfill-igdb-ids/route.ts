@@ -133,8 +133,13 @@ export async function POST(req: Request) {
         if (hit?.igdb_game_id) break;
       }
 
-      const igdbId = hit?.igdb_game_id ? Number(hit.igdb_game_id) : null;
-      if (!igdbId || !Number.isFinite(igdbId)) {
+      const rawIgdb = hit?.igdb_game_id;
+      if (rawIgdb == null) {
+        skipped += 1;
+        continue;
+      }
+      const igdbId = Number(rawIgdb);
+      if (!Number.isFinite(igdbId) || igdbId <= 0) {
         skipped += 1;
         continue;
       }

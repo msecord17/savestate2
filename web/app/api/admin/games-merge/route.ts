@@ -18,9 +18,22 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const igdbGameId = body.igdb_game_id != null ? Number(body.igdb_game_id) : null;
+  const rawIgdb = body.igdb_game_id;
+
+  if (rawIgdb == null) {
+    return NextResponse.json(
+      { error: "Missing or invalid igdb_game_id" },
+      { status: 400 }
+    );
+  }
+
+  const igdbGameId = Number(rawIgdb);
+
   if (!Number.isFinite(igdbGameId)) {
-    return NextResponse.json({ error: "Missing or invalid igdb_game_id" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Missing or invalid igdb_game_id" },
+      { status: 400 }
+    );
   }
 
   const { data: games, error: listErr } = await admin

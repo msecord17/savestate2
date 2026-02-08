@@ -69,12 +69,17 @@ export async function GET(req: Request) {
 
   if (extErr) return NextResponse.json({ error: extErr.message }, { status: 500 });
 
-  let raGameId = ext?.external_id ? Number(ext.external_id) : null;
+  const rawRaId = ext?.external_id;
+  let raGameId: number | null = null;
+  if (rawRaId != null) {
+    const n = Number(rawRaId);
+    if (Number.isFinite(n)) raGameId = n;
+  }
 
   // ─────────────────────────────────────────────
   // AUTO-MAP if missing
   // ─────────────────────────────────────────────
-  if (!raGameId || !Number.isFinite(raGameId)) {
+  if (raGameId == null) {
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
