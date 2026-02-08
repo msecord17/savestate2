@@ -1,3 +1,4 @@
+import { apiGet } from "./client";
 import type {
   IdentitySummaryApiResponse,
   TimelineResponse,
