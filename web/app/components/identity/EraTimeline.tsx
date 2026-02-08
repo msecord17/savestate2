@@ -1,29 +1,6 @@
 "use client";
 
-type EraBucket =
-  | "early_arcade_pre_crash"
-  | "8bit_home"
-  | "16bit"
-  | "32_64bit"
-  | "ps2_xbox_gc"
-  | "hd_era"
-  | "ps4_xbo"
-  | "switch_wave"
-  | "modern"
-  | "unknown";
-
-const ERA_LABELS: Record<EraBucket, string> = {
-  early_arcade_pre_crash: "Atari / Early",
-  "8bit_home": "8-bit",
-  "16bit": "16-bit",
-  "32_64bit": "PS1/N64",
-  ps2_xbox_gc: "PS2 era",
-  hd_era: "HD era",
-  ps4_xbo: "PS4 era",
-  switch_wave: "Switch wave",
-  modern: "Modern",
-  unknown: "Unknown",
-};
+import { eraLabel } from "@/lib/identity/eras";
 
 export default function EraTimeline({
   eraBuckets,
@@ -66,7 +43,7 @@ export default function EraTimeline({
               style={{ width: `${Math.min(220, 120 + pct)}px` }}
             >
               <div className="text-xs font-medium text-white">
-                {ERA_LABELS[era as EraBucket] ?? era}
+                {eraLabel(era)}
               </div>
               <div className="mt-1 text-lg font-semibold leading-none text-white">{v.games ?? 0}</div>
               <div className="mt-1 text-[11px] text-white/70">{v.releases ?? 0} releases</div>

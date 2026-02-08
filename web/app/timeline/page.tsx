@@ -5,26 +5,21 @@ import { fetchTimeline } from "@/src/core/api/identity";
 import type { EraTimelineItem, TimelineResponse } from "@/lib/identity/types";
 import { EraDetailDrawer } from "@/app/components/identity/EraDetailDrawer";
 import { TimelineView } from "@/components/identity/TimelineView";
+import { eraLabel, eraYears, toEraKey } from "@/lib/identity/eras";
 
-/** One sentence per era for the drawer (no raw counts). Release-year and played-on keys. */
+/** One sentence per era for the drawer (no raw counts). Canonical genX keys only; legacy keys normalized via toEraKey. */
 const INTERPRETATION: Record<string, string> = {
-  early_arcade_pre_crash: "This era holds a special place in your library.",
-  "8bit_home": "Your collection has a strong foothold in the 8-bit era.",
-  "16bit": "The 16-bit era is well represented in your library.",
-  "32_64bit": "You've built a notable slice of the PS1/N64 era.",
-  ps2_xbox_gc: "The PS2 era holds a strong place in your library.",
-  hd_era: "Your library spans the HD era with breadth.",
-  ps4_xbo: "The PS4 era is a cornerstone of your collection.",
-  switch_wave: "The Switch wave is well represented in your library.",
-  modern: "Your library leans into the modern era.",
+  gen1_1972_1977: "This era holds a special place in your library.",
+  gen2_1976_1984: "Your collection has a strong foothold in the 8-bit cartridge era.",
+  gen3_1983_1992: "The NES era is well represented in your library.",
+  gen4_1987_1996: "The 16-bit era is well represented in your library.",
+  gen5a_1993_1996: "You've built a notable slice of the 32-bit dawn.",
+  gen5b_1996_2001: "The N64 / 64-bit wave holds a strong place in your library.",
+  gen6_1998_2005: "The PS2 / OG Xbox / GC era is a cornerstone of your collection.",
+  gen7_2005_2012: "Your library spans the HD era with breadth.",
+  gen8_2013_2019: "The PS4 / Xbox One / Switch era is well represented.",
+  gen9_2020_plus: "Your library leans into the modern era.",
   unknown: "This era rounds out your collection.",
-  early_retro: "You've played on early and retro hardware.",
-  ps2_ogxbox_gc: "This hardware generation shaped your play.",
-  ps3_360_wii: "The PS3/360/Wii generation is well represented in how you play.",
-  ps4_xbox_one_switch: "You play a lot on this generation of consoles.",
-  pc: "PC is a major part of how you play.",
-  xbox_hd: "Xbox (HD/Modern) is part of your play history.",
-  unknown_played_on: "This bucket rounds out your played-on history.",
 };
 
 const DEFAULT_CHIPS: [string, string, string] = ["Library depth", "Era focus", "Multi-platform"];
@@ -75,14 +70,18 @@ export default function TimelinePage() {
         open={drawerOpen}
         onOpenChange={setDrawerOpen}
         eraKey={selectedEra?.era ?? null}
-        eraLabel={selectedEra?.label ?? ""}
-        eraYears={selectedEra?.years ?? "—"}
-        interpretation={selectedEra ? INTERPRETATION[selectedEra.era] ?? "This era is part of your library." : ""}
+        eraLabel={selectedEra ? eraLabel(selectedEra.era) : ""}
+        eraYears={selectedEra ? eraYears(selectedEra.era) : "—"}
+        interpretation={selectedEra ? INTERPRETATION[toEraKey(selectedEra.era)] ?? "This era is part of your library." : ""}
         signalChips={selectedEra ? toSignalChips(selectedEra.topSignals) : DEFAULT_CHIPS}
         notableGames={
           selectedEra?.notable?.map((n) => ({
             title: n.title,
             platform: null,
+            played_on: n.played_on ?? null,
+            earned: n.earned,
+            total: n.total,
+            minutes_played: n.minutes_played,
           })) ?? []
         }
         archetypeSnapshot="Your profile in this era will appear as you connect platforms and add games."

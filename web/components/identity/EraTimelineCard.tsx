@@ -2,7 +2,7 @@
 
 import { GlassCard } from "@/components/ui/glass-card";
 import { resolveCoverUrl } from "@/lib/images/resolveCoverUrl";
-import { ERA_YEARS } from "@/lib/identity/era";
+import { eraLabel, eraYears } from "@/lib/identity/eras";
 import type { EraTimelineItem } from "@/lib/identity/types";
 
 export type EraTimelineCardProps = {
@@ -35,7 +35,8 @@ function rankPillLabel(rank: number): string {
 export function EraTimelineCard({ era, onSelect }: EraTimelineCardProps) {
   const interpretation = interpretationFromDensity(era.games, era.releases);
   const pill = rankPillLabel(era.rank);
-  const displayYears = era.years?.trim() || ERA_YEARS[era.era] || "—";
+  const displayLabel = eraLabel(era.era);
+  const displayYears = eraYears(era.era) || "—";
   const hasTopSignals = era.topSignals.length > 0;
   const defaultSubtext = `${era.games} games • ${era.releases} releases`;
 
@@ -57,7 +58,7 @@ export function EraTimelineCard({ era, onSelect }: EraTimelineCardProps) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-            {era.label}
+            {displayLabel}
           </h2>
           <p className="mt-0.5 text-xs text-slate-600 dark:text-white/70">
             {displayYears}

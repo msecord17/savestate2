@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
-import { cleanTitleForXboxIgdb, igdbSearchBest, upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { getOrCreateProvisionalGameAndEnqueue, getOrCreateGameForXboxApp } from "@/lib/provisional-game";
+import { isXboxNonGame } from "@/lib/igdb/server";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
+import {
+  lookupGameId,
+  upsertGameExternalId,
+  gameExternalIdRow,
+} from "@/lib/game-external-ids";
 
 // If you already use another key format, keep consistent with your other platforms:
 function slugPlatformKey() {
@@ -61,6 +67,7 @@ export async function POST() {
       const pfTitleId = (r.pf_title_id ?? null) as string | null;
       const playtimeMinutes = Number(r.playtime_minutes || 0);
       const lastPlayedAt = (r.last_played_at ?? null) as string | null;
+      const isApp = isXboxNonGame(title);
 
       if (!title) continue;
 
@@ -91,13 +98,38 @@ export async function POST() {
           if (existingRelease?.id) releaseId = existingRelease.id;
         }
 
-        // 3) If still missing, create game (resolver) then find/create release by (platform_key, game_id)
+        // 3) If still missing, resolve game_id (apps: content_type='app' no enqueue; games: provisional + enqueue)
         if (!releaseId) {
           let gameId: string;
+          const xboxExternalId = pfTitleId || titleId;
           try {
-            const cleanedForIgdb = cleanTitleForXboxIgdb(title);
-            const { game_id } = await upsertGameIgdbFirst(supabaseAdmin, cleanedForIgdb, { platform_key: "xbox" });
-            gameId = game_id;
+            if (xboxExternalId) {
+              const existingGameId = await lookupGameId(supabaseAdmin, "xbox", xboxExternalId);
+              if (existingGameId) {
+                gameId = existingGameId;
+                if (isApp) await supabaseAdmin.from("games").update({ content_type: "app", updated_at: new Date().toISOString() }).eq("id", existingGameId);
+              } else if (isApp) {
+                const res = await getOrCreateGameForXboxApp(supabaseAdmin, {
+                  source: "xbox",
+                  external_id: xboxExternalId,
+                  title,
+                });
+                gameId = res.game_id;
+              } else {
+                const res = await getOrCreateProvisionalGameAndEnqueue(supabaseAdmin, {
+                  source: "xbox",
+                  external_id: xboxExternalId,
+                  title,
+                });
+                gameId = res.game_id;
+              }
+            } else {
+              const syntheticId = `xbox-import:${(pfTitleId || titleId || title).toString().slice(0, 120)}`;
+              const res = isApp
+                ? await getOrCreateGameForXboxApp(supabaseAdmin, { source: "xbox", external_id: syntheticId, title })
+                : await getOrCreateProvisionalGameAndEnqueue(supabaseAdmin, { source: "xbox", external_id: syntheticId, title });
+              gameId = res.game_id;
+            }
           } catch (e) {
             return NextResponse.json(
               { error: `Failed to create/find game for ${title}: ${(e as Error)?.message || "unknown"}` },
@@ -122,16 +154,15 @@ export async function POST() {
           if (existingByPlatformGame?.id) {
             releaseId = String(existingByPlatformGame.id);
             if (xboxKey) {
-              await supabaseAdmin
-                .from("releases")
-                .update({
-                  xbox_title_id: xboxKey,
-                  display_title: title,
-                  platform_label: platformLabel,
-                  cover_url: xboxFallbackCover(xboxKey),
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", releaseId);
+              const patch: Record<string, unknown> = {
+                xbox_title_id: xboxKey,
+                display_title: title,
+                platform_label: platformLabel,
+                cover_url: xboxFallbackCover(xboxKey),
+                updated_at: new Date().toISOString(),
+              };
+              if (isApp) patch.content_type = "app";
+              await supabaseAdmin.from("releases").update(patch).eq("id", releaseId);
             }
           } else {
             // Fallback: existing release by (platform_key, display_title, platform_label) — attach game_id
@@ -145,29 +176,30 @@ export async function POST() {
 
             if (existingByTitle?.id) {
               releaseId = String(existingByTitle.id);
-              await supabaseAdmin
-                .from("releases")
-                .update({
-                  game_id: gameId,
-                  xbox_title_id: xboxKey,
-                  display_title: title,
-                  platform_label: platformLabel,
-                  cover_url: xboxFallbackCover(xboxKey),
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", releaseId);
+              const patch: Record<string, unknown> = {
+                game_id: gameId,
+                xbox_title_id: xboxKey,
+                display_title: title,
+                platform_label: platformLabel,
+                cover_url: xboxFallbackCover(xboxKey),
+                updated_at: new Date().toISOString(),
+              };
+              if (isApp) patch.content_type = "app";
+              await supabaseAdmin.from("releases").update(patch).eq("id", releaseId);
             } else {
+              const insertPayload: Record<string, unknown> = {
+                game_id: gameId,
+                display_title: title,
+                platform_name: "Xbox",
+                platform_key: slugPlatformKey(),
+                platform_label: platformLabel,
+                xbox_title_id: xboxKey,
+                cover_url: xboxFallbackCover(xboxKey),
+              };
+              if (isApp) insertPayload.content_type = "app";
               const { data: newRelease, error: rErr } = await supabaseAdmin
                 .from("releases")
-                .insert({
-                  game_id: gameId,
-                  display_title: title,
-                  platform_name: "Xbox",
-                  platform_key: slugPlatformKey(),
-                  platform_label: platformLabel,
-                  xbox_title_id: xboxKey,
-                  cover_url: xboxFallbackCover(xboxKey),
-                })
+                .insert(insertPayload)
                 .select("id, cover_url")
                 .single();
 
@@ -226,35 +258,21 @@ export async function POST() {
             }
           }
 
-          // IGDB enrichment only when igdb_game_id IS NULL (spine rule: never overwrite a good match)
-          const { data: gameRow } = await supabaseAdmin
-            .from("games")
-            .select("id, igdb_game_id")
-            .eq("id", gameId)
-            .maybeSingle();
-          if (!gameRow?.igdb_game_id) {
-            const cleanedForIgdb = cleanTitleForXboxIgdb(title);
-            const hit = await igdbSearchBest(cleanedForIgdb, { rawTitle: title });
-            if (hit?.igdb_game_id && gameId) {
-              await supabaseAdmin
-                .from("games")
-                .update({
-                  igdb_game_id: hit.igdb_game_id,
-                  summary: hit.summary,
-                  genres: hit.genres,
-                  developer: hit.developer,
-                  publisher: hit.publisher,
-                  first_release_year: hit.first_release_year,
-                  updated_at: new Date().toISOString(),
-                })
-                .eq("id", gameId);
-
-              if (hit.cover_url) {
-                await supabaseAdmin
-                  .from("releases")
-                  .update({ cover_url: hit.cover_url, updated_at: new Date().toISOString() })
-                  .eq("id", releaseId);
-              }
+          // Enqueue for resolver when igdb_game_id IS NULL (skip for apps — they are not games)
+          if (!isApp) {
+            const { data: gameRow } = await supabaseAdmin
+              .from("games")
+              .select("id, igdb_game_id")
+              .eq("id", gameId)
+              .maybeSingle();
+            if (!gameRow?.igdb_game_id && gameId) {
+              await supabaseAdmin.from("game_match_attempts").insert({
+                source: "xbox",
+                external_id: key || `xbox:${gameId}`,
+                title_used: title,
+                game_id: gameId,
+                outcome: "pending",
+              });
             }
           }
 

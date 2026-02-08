@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { isLikelyNonGame, igdbSearchBest } from "@/lib/igdb/server";
+import { isLikelyNonGame, igdbSearchBestSingle } from "@/lib/igdb/server";
 
 // Split CamelCase / mashed titles (TigerWoodsPGATOUR07 → Tiger Woods PGA TOUR 07)
 function deMashTitle(s: string) {
@@ -129,7 +129,7 @@ export async function POST(req: Request) {
       let usedTitle = canonical;
       for (const t of candidates) {
         usedTitle = t;
-        hit = await igdbSearchBest(t);
+        hit = await igdbSearchBestSingle(t);
         if (hit?.igdb_game_id) break;
       }
 

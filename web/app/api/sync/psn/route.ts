@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { createClient } from "@supabase/supabase-js";
-import { igdbSearchBest, normalizeCanonicalTitle, upsertGameIgdbFirst } from "@/lib/igdb/server";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
+import { getOrCreateGameForSync, upsertGameMasterMappingIngest } from "@/lib/sync-game-resolve";
 import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
 import {
@@ -177,8 +177,8 @@ async function mergeUpsertPsnTitle(
 
 /**
  * Ensure a releases row exists for this PSN title, anchored on release_external_ids(source='psn', external_id).
- * (0) Lookup mapping first and return if exists; (1) resolve game_id; (2) find by (platform_key, game_id);
- * (3) insert with 23505 race handling; (4) upsert mapping (ignoreDuplicates); if mapped release_id differs, merge and use mapped.
+ * (0) Upsert game_master_mappings with latest source_title/source_platform/source_cover_url; (1) lookup release_external_ids and return if exists;
+ * (2) resolve game_id via getOrCreateGameForSync; (3) find/create release; (4) upsert release_external_ids; merge if needed.
  */
 async function ensureReleaseForPsnTitle(
   opts: {
@@ -186,12 +186,21 @@ async function ensureReleaseForPsnTitle(
     titleName: string;
     psnExternalId: string; // real npCommunicationId/titleId OR synthetic id
     platformLabel: string; // PS5/PS4/...
+    source_cover_url?: string | null;
   },
   retried23505?: boolean
 ): Promise<string> {
-  const { admin, titleName, psnExternalId, platformLabel } = opts;
+  const { admin, titleName, psnExternalId, platformLabel, source_cover_url } = opts;
 
-  // (0) Anchor: lookup release_external_ids(source='psn', external_id) and return if exists
+  await upsertGameMasterMappingIngest(admin, {
+    source: "psn",
+    external_id: psnExternalId,
+    source_title: titleName,
+    source_platform: platformLabel,
+    source_cover_url: source_cover_url ?? null,
+  });
+
+  // (1) Anchor: lookup release_external_ids(source='psn', external_id) and return if exists
   const { data: mapRow, error: mapErr } = await admin
     .from("release_external_ids")
     .select("release_id")
@@ -202,8 +211,13 @@ async function ensureReleaseForPsnTitle(
   if (mapErr) throw new Error(`release_external_ids lookup failed: ${mapErr.message}`);
   if (mapRow?.release_id) return String(mapRow.release_id);
 
-  // (1) Resolve game_id via IGDB-first
-  const { game_id: gameId } = await upsertGameIgdbFirst(admin, titleName, { platform: "psn" });
+  // (1) Resolve game_id: game_external_refs + game_match_queue; no IGDB inline
+  const { game_id: gameId } = await getOrCreateGameForSync(admin, {
+    source: "psn",
+    external_id: psnExternalId,
+    raw_title: titleName,
+    platform_key: "psn",
+  });
 
   // (2) Find release by (platform_key='psn', game_id)
   const { data: existingByGame, error: findErr } = await admin
@@ -462,16 +476,16 @@ export async function POST() {
             Number(definedObj.platinum || 0)
           : null;
 
+      const iconUrl = String(t?.trophyTitleIconUrl ?? "").trim() || null;
       const releaseId = await ensureReleaseForPsnTitle({
         admin: supabaseAdmin,
         titleName,
         psnExternalId: key,
         platformLabel,
+        source_cover_url: iconUrl || null,
       });
 
       releasesTouched += 1;
-
-      const iconUrl = String(t?.trophyTitleIconUrl ?? "").trim() || null;
 
       const res = await mergeUpsertPsnTitle(supabaseUser, user.id, key, {
         title_name: titleName,

@@ -1,44 +1,7 @@
 "use client";
 
 import { GlassCard } from "@/components/ui/glass-card";
-
-type EraBucket =
-  | "early_arcade_pre_crash"
-  | "8bit_home"
-  | "16bit"
-  | "32_64bit"
-  | "ps2_xbox_gc"
-  | "hd_era"
-  | "ps4_xbo"
-  | "switch_wave"
-  | "modern"
-  | "unknown";
-
-export const ERA_LABELS: Record<string, string> = {
-  early_arcade_pre_crash: "Atari / Early",
-  "8bit_home": "8-bit",
-  "16bit": "16-bit",
-  "32_64bit": "PS1/N64",
-  ps2_xbox_gc: "PS2 era",
-  hd_era: "HD era",
-  ps4_xbo: "PS4 era",
-  switch_wave: "Switch wave",
-  modern: "Modern",
-  unknown: "Unknown",
-};
-
-export const ERA_YEARS: Record<string, string> = {
-  early_arcade_pre_crash: "≤1979",
-  "8bit_home": "1980–1989",
-  "16bit": "1990–1995",
-  "32_64bit": "1996–2000",
-  ps2_xbox_gc: "2001–2005",
-  hd_era: "2006–2012",
-  ps4_xbo: "2013–2016",
-  switch_wave: "2017–2019",
-  modern: "2020+",
-  unknown: "—",
-};
+import { eraLabel, eraYears } from "@/lib/identity/eras";
 
 export function EraTimeline({
   eraBuckets,
@@ -69,8 +32,8 @@ export function EraTimeline({
         {entries.map(([era, v]) => {
           const active = selectedEra === era;
           const isTop = topEra && topEra[0] === era;
-          const label = ERA_LABELS[era as EraBucket] ?? era;
-          const years = ERA_YEARS[era] ?? "—";
+          const label = eraLabel(era);
+          const years = eraYears(era) || "—";
           return (
             <GlassCard
               key={era}

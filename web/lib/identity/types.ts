@@ -101,6 +101,12 @@ export type TimelineNotableGame = {
   title: string;
   platform?: string | null;
   cover_url?: string | null;
+  /** Where you played it (e.g. "Played on: Xbox 360") so remasters don't masquerade as era-defining. */
+  played_on?: string | null;
+  /** For "Signals: X/Y achievements • Zh" chip. */
+  earned?: number;
+  total?: number;
+  minutes_played?: number;
 };
 
 /** Single era in GET /api/identity/timeline response (new contract). */
@@ -112,7 +118,17 @@ export type EraTimelineItem = {
   games: number;
   releases: number;
   topSignals: Array<{ key: string; label: string }>;
-  notable: Array<{ release_id: string; title: string; cover_url: string | null }>;
+  notable: Array<{
+    release_id: string;
+    title: string;
+    cover_url: string | null;
+    /** "Played on: PlayStation" | "Played on: Xbox" | "Played on: PC" etc. from strongest signal. */
+    played_on?: string | null;
+    /** For drawer "Signals: X/Y achievements • Zh" */
+    earned?: number;
+    total?: number;
+    minutes_played?: number;
+  }>;
   /** When < 3, drawer can show "Based on N titles with achievements". Omitted if 0. */
   titles_with_achievements?: number;
 };

@@ -6,12 +6,14 @@ import Link from "next/link";
 import ProgressBlock, { type ProgressSignal } from "@/components/progress/ProgressBlock";
 import { resolveCoverUrl } from "@/lib/images/resolveCoverUrl";
 import { IdentityStrip } from "@/app/components/identity/IdentityStrip";
-import { EraTimeline, ERA_LABELS, ERA_YEARS } from "@/components/identity/EraTimeline";
+import { EraTimeline } from "@/components/identity/EraTimeline";
+import { eraLabel, eraYears, mergeEraBucketsByCanonical } from "@/lib/identity/eras";
 import { TopSignalsRow } from "@/app/components/identity/TopSignalsRow";
 import { EvolutionLine } from "@/app/components/identity/EvolutionLine";
 import { ArchetypeDrawer } from "@/app/components/identity/ArchetypeDrawer";
 import { EraDetailDrawer } from "@/app/components/identity/EraDetailDrawer";
 import type { IdentitySummaryApiResponse } from "@/lib/identity/types";
+import { originBucketFromYear } from "@/lib/identity/era";
 import { ARCHETYPE_THEME, ERA_THEME, STRENGTH_LABELS } from "@/lib/identity/strip-themes";
 import type { IdentitySignal } from "@/lib/identity/types";
 import {
@@ -124,20 +126,6 @@ function minutesToHours(min: number) {
   return `${h}h`;
 }
 
-/** Era bucket from release year; same mapping as get_identity_signals SQL. */
-function eraBucketFromYear(y?: number | null): string {
-  if (y == null || !Number.isFinite(y)) return "unknown";
-  if (y <= 1979) return "early_arcade_pre_crash";
-  if (y >= 1980 && y <= 1989) return "8bit_home";
-  if (y >= 1990 && y <= 1995) return "16bit";
-  if (y >= 1996 && y <= 2000) return "32_64bit";
-  if (y >= 2001 && y <= 2005) return "ps2_xbox_gc";
-  if (y >= 2006 && y <= 2012) return "hd_era";
-  if (y >= 2013 && y <= 2016) return "ps4_xbo";
-  if (y >= 2017 && y <= 2019) return "switch_wave";
-  if (y >= 2020) return "modern";
-  return "unknown";
-}
 
 function timeAgo(iso: string | null) {
   if (!iso) return null;
@@ -466,7 +454,7 @@ export default function GameHomePage() {
     }
 
     if (eraFilter) {
-      out = out.filter((c) => eraBucketFromYear(c.first_release_year) === eraFilter);
+      out = out.filter((c) => originBucketFromYear(c.first_release_year) === eraFilter);
     }
 
     if (updatedRecently) {
@@ -525,11 +513,11 @@ export default function GameHomePage() {
         <IdentityStrip chips={identityChips} onOpenDrawer={() => setDrawerOpen(true)} />
         <div className="px-4">
           <EraTimeline
-            eraBuckets={
+            eraBuckets={mergeEraBucketsByCanonical(
               identitySummary?.identity_signals?.era_buckets ??
-              identitySummary?.era_buckets ??
-              undefined
-            }
+                identitySummary?.era_buckets ??
+                undefined
+            )}
             selectedEra={eraFilter}
             onSelectEra={toggleEra}
           />
@@ -560,8 +548,8 @@ export default function GameHomePage() {
           open={eraDrawerOpen}
           onOpenChange={setEraDrawerOpen}
           eraKey={eraFilter}
-          eraLabel={eraFilter ? (ERA_LABELS[eraFilter] ?? eraFilter) : ""}
-          eraYears={eraFilter ? (ERA_YEARS[eraFilter] ?? "—") : "—"}
+          eraLabel={eraFilter ? eraLabel(eraFilter) : ""}
+          eraYears={eraFilter ? eraYears(eraFilter) : "—"}
           interpretation="This era holds a strong place in your library. You collect across platforms and editions."
           signalChips={["Library depth", "Era focus", "Multi-platform"]}
           notableGames={eraDetailNotableGames}

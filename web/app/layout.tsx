@@ -18,17 +18,18 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             minHeight: TOP_NAV_MIN_HEIGHT,
           }}
         >
-          <Link href="/gamehome">GameHome</Link>
-          <Link href="/timeline">Timeline</Link>
-          <Link href="/portfolio">Search</Link>
-          <Link href="/my-portfolio">My Portfolio</Link>
-          <Link href="/profile">Profile</Link>
-          <Link href="/lists">Lists</Link>
-          <Link href="/leaderboard">Leaderboard</Link>
-          <Link href="/add-games">Add Games</Link>
+          <Link href="/gamehome" prefetch={false}>GameHome</Link>
+          <Link href="/timeline" prefetch={false}>Timeline</Link>
+          <Link href="/portfolio" prefetch={false}>Search</Link>
+          <Link href="/my-portfolio" prefetch={false}>My Portfolio</Link>
+          <Link href="/profile" prefetch={false}>Profile</Link>
+          <Link href="/lists" prefetch={false}>Lists</Link>
+          <Link href="/leaderboard" prefetch={false}>Leaderboard</Link>
+          <Link href="/add-games" prefetch={false}>Add Games</Link>
+          <Link href="/admin/matches?status=needs_review" prefetch={false}>Admin</Link>
           <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
-            <Link href="/login">Login</Link>
-            <Link href="/logout">Logout</Link>
+            <Link href="/login" prefetch={false}>Login</Link>
+            <Link href="/logout" prefetch={false}>Logout</Link>
           </div>
         </nav>
 

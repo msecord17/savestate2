@@ -28,17 +28,7 @@ function topKeyBy<T extends Record<string, number>>(m: T): { key: string | null;
   return { key: bestK, value: bestV };
 }
 
-const ERA_LABELS: Record<string, string> = {
-  early_arcade_pre_crash: "Atari / Early",
-  "8bit_home": "8-bit",
-  "16bit": "16-bit",
-  "32_64bit": "PS1 / N64",
-  ps2_xbox_gc: "PS2 era",
-  hd_era: "PS3 / 360",
-  ps4_xbo: "PS4 era",
-  switch_wave: "Switch wave",
-  modern: "Modern",
-};
+import { eraLabel } from "@/lib/identity/eras";
 
 export type CollectorArchetype = {
   key: string;
@@ -106,9 +96,9 @@ export function computeCollectorArchetypes(
         label: "Era Keeper",
         strength: strengthTier(score),
         score,
-        meta: { era: topEra, era_label: ERA_LABELS[topEra] || topEra, share },
+        meta: { era: topEra, era_label: eraLabel(topEra), share },
         reasons: [
-          `${Math.round(share * 100)}% of your library in ${ERA_LABELS[topEra] || topEra}`,
+          `${Math.round(share * 100)}% of your library in ${eraLabel(topEra)}`,
         ],
         verbs: ["collect", "preserve", "specialize"],
       });

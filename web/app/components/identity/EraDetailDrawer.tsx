@@ -7,34 +7,46 @@ import { fadeUp } from "@/src/ui/motion";
 import { ERA_THEME, ERA_THEME_DEFAULT } from "@/lib/identity/strip-themes";
 import { ARCHETYPE_THEME } from "@/lib/identity/strip-themes";
 
-/** Map era bucket keys (EraTimeline) to ERA_THEME keys for accent color. */
+import { toEraKey } from "@/lib/identity/eras";
+
+/** Map canonical era keys to ERA_THEME keys for accent color. Legacy keys normalized via toEraKey. */
 const ERA_BUCKET_TO_THEME: Record<string, string> = {
-  early_arcade_pre_crash: "atari",
-  "8bit_home": "nes",
-  "16bit": "snes",
-  "32_64bit": "ps1",
-  ps2_xbox_gc: "ps2",
-  hd_era: "ps3_360",
-  ps4_xbo: "modern",
-  switch_wave: "wii",
-  modern: "modern",
+  gen1_1972_1977: "atari",
+  gen2_1976_1984: "nes",
+  gen3_1983_1992: "nes",
+  gen4_1987_1996: "snes",
+  gen5a_1993_1996: "ps1",
+  gen5b_1996_2001: "ps1",
+  gen6_1998_2005: "ps2",
+  gen7_2005_2012: "ps3_360",
+  gen8_2013_2019: "modern",
+  gen9_2020_plus: "modern",
   unknown: "modern",
 };
 
-export type NotableGame = { title: string; platform?: string | null };
+export type NotableGame = {
+  title: string;
+  platform?: string | null;
+  /** e.g. "Played on: Xbox 360" */
+  played_on?: string | null;
+  /** For "Signals: X/Y achievements • Zh" */
+  earned?: number;
+  total?: number;
+  minutes_played?: number;
+};
 
 export type EraDetailDrawerProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Era bucket key (e.g. ps2_xbox_gc). */
+  /** Era bucket key (canonical genX or legacy; normalized for theme). */
   eraKey: string | null;
   eraLabel: string;
   eraYears: string;
   /** One sentence about this era in the user's library (no raw counts). */
   interpretation: string;
-  /** Exactly 3 short chip labels (no numbers). */
-  signalChips: [string, string, string];
-  /** 3–5 notable games from this era. */
+  /** Optional era-level chip labels (e.g. ["Library depth", "Era focus"]). Shown below interpretation if provided. */
+  signalChips?: [string, string, string];
+  /** 3–5 notable games; each can show played_on + signals chips. */
   notableGames: NotableGame[];
   /** Era-scoped archetype line, e.g. "Your collection in this era leans Explorer." */
   archetypeSnapshot: string;
@@ -57,12 +69,12 @@ export function EraDetailDrawer({
   primaryArchetypeKey,
   achievementsClarification,
 }: EraDetailDrawerProps) {
-  const themeKey = eraKey ? ERA_BUCKET_TO_THEME[eraKey] ?? "modern" : "modern";
+  const themeKey = eraKey ? ERA_BUCKET_TO_THEME[toEraKey(eraKey)] ?? "modern" : "modern";
   const eraTheme = ERA_THEME[themeKey] ?? ERA_THEME_DEFAULT;
   const reduce = useReducedMotion();
   const sectionVariants = reduce ? undefined : fadeUp;
 
-  const title = `${eraLabel} · ${eraYears}`;
+  const title = `Origin era: ${eraLabel}`;
 
   React.useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -96,34 +108,36 @@ export function EraDetailDrawer({
               {interpretation}
             </motion.p>
 
-            {/* 2. Three signal chips */}
-            <motion.div
-              variants={sectionVariants}
-              initial="hidden"
-              animate="show"
-              custom={1}
-            >
-              <div className="flex flex-wrap gap-2">
-                {signalChips.map((label, i) => (
-                  <span
-                    key={i}
-                    className={[
-                      "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium",
-                      eraTheme.border,
-                      eraTheme.bg,
-                      "text-white/90",
-                    ].join(" ")}
-                  >
-                    {label}
-                  </span>
-                ))}
-              </div>
-              {achievementsClarification ? (
-                <p className="mt-2 text-xs text-white/60">{achievementsClarification}</p>
-              ) : null}
-            </motion.div>
+            {/* 2. Era-level signal chips (optional) */}
+            {signalChips && signalChips.some(Boolean) ? (
+              <motion.div
+                variants={sectionVariants}
+                initial="hidden"
+                animate="show"
+                custom={1}
+              >
+                <div className="flex flex-wrap gap-2">
+                  {signalChips.map((label, i) => (
+                    <span
+                      key={i}
+                      className={[
+                        "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium",
+                        eraTheme.border,
+                        eraTheme.bg,
+                        "text-white/90",
+                      ].join(" ")}
+                    >
+                      {label}
+                    </span>
+                  ))}
+                </div>
+                {achievementsClarification ? (
+                  <p className="mt-2 text-xs text-white/60">{achievementsClarification}</p>
+                ) : null}
+              </motion.div>
+            ) : null}
 
-            {/* 3. Notable games (3–5) */}
+            {/* 3. Notable games (3–5) with played_on + signals chips */}
             <motion.div
               variants={sectionVariants}
               initial="hidden"
@@ -133,18 +147,59 @@ export function EraDetailDrawer({
               <h3 className="text-xs font-semibold uppercase tracking-wider text-white/60 mb-2">
                 Standout titles
               </h3>
-              <ul className="space-y-2">
-                {notableGames.slice(0, 5).map((g, i) => (
-                  <li
-                    key={i}
-                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90"
-                  >
-                    <span className="font-medium">{g.title}</span>
-                    {g.platform ? (
-                      <span className="ml-2 text-xs text-white/55">{g.platform}</span>
-                    ) : null}
-                  </li>
-                ))}
+              <ul className="space-y-3">
+                {notableGames.slice(0, 5).map((g, i) => {
+                  const hasAchievements = g.total != null && g.total > 0;
+                  const signalsLabel =
+                    hasAchievements && g.earned != null
+                      ? `Signals: ${g.earned}/${g.total} achievements`
+                      : null;
+                  const hours =
+                    g.minutes_played != null && g.minutes_played > 0
+                      ? `${Math.round(g.minutes_played / 60)}h`
+                      : null;
+                  const signalsChip =
+                    signalsLabel && hours
+                      ? `${signalsLabel} • ${hours}`
+                      : signalsLabel ?? (hours ? `${hours} playtime` : null);
+                  return (
+                    <li
+                      key={i}
+                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-2.5 text-sm text-white/90"
+                    >
+                      <div className="font-medium">{g.title}</div>
+                      <div className="mt-1.5 flex flex-wrap gap-2">
+                        {g.played_on ? (
+                          <span
+                            className={[
+                              "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+                              eraTheme.border,
+                              eraTheme.bg,
+                              "text-white/80",
+                            ].join(" ")}
+                          >
+                            {g.played_on}
+                          </span>
+                        ) : null}
+                        {signalsChip ? (
+                          <span
+                            className={[
+                              "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+                              eraTheme.border,
+                              eraTheme.bg,
+                              "text-white/80",
+                            ].join(" ")}
+                          >
+                            {signalsChip}
+                          </span>
+                        ) : null}
+                        {g.platform && !g.played_on ? (
+                          <span className="text-xs text-white/55">{g.platform}</span>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
               {notableGames.length === 0 && (
                 <p className="text-sm text-white/50">No games in this era in your library yet.</p>

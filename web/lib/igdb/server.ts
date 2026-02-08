@@ -1,4 +1,4 @@
-type IgdbHit = {
+export type IgdbHit = {
     igdb_game_id: number;
     title: string;
     summary: string | null;
@@ -7,6 +7,8 @@ type IgdbHit = {
     publisher: string | null;
     first_release_year: number | null;
     cover_url: string | null;
+    /** IGDB category: 0 = main_game, 1 = dlc, 2 = expansion, 3 = bundle, etc. Guardrail: only accept 0. */
+    category?: number | null;
   };
   
   function normalizeCover(url: string | null) {
@@ -53,6 +55,7 @@ type IgdbHit = {
     name,
     summary,
     first_release_date,
+    category,
     genres.name,
     involved_companies.company.name,
     involved_companies.developer,
@@ -153,6 +156,7 @@ type IgdbHit = {
       publisher: pubCompany ? String(pubCompany) : null,
       first_release_year: year,
       cover_url: normalizeCover(g?.cover?.url ?? null),
+      category: g?.category != null ? Number(g.category) : null,
     };
   }
 
@@ -172,7 +176,7 @@ type IgdbHit = {
     return null;
   }
 
-  /** Tokenize for overlap: lowercase, split on non-alphanumeric, unique. */
+  /** Tokenize for overlap: lowercase, split on non-alphanumeric, unique, min length 2. */
   function tokenize(s: string): string[] {
     return Array.from(
       new Set(
@@ -180,48 +184,181 @@ type IgdbHit = {
           .toLowerCase()
           .replace(/™|®|©/g, "")
           .split(/[^a-z0-9]+/)
-          .filter(Boolean)
+          .filter((t) => t.length >= 2)
       )
     );
   }
 
+  const EDITION_BUNDLE_PATTERN = /\b(edition|remastered|definitive|deluxe|complete|anniversary|bundle|collection|pack|goty|game of the year)\b/i;
+
+  /** IGDB category: 0=main_game, 1=dlc_addon, 2=expansion, 3=bundle, 7=season, 8=remake, 9=remaster, 11=port, 13=pack. */
+  const CATEGORY_PREFERRED = new Set([0, 8, 9, 11]); // MAIN_GAME, REMASTER, REMAKE, PORT
+  const CATEGORY_PENALIZED = new Set([1, 2, 3, 7, 13]); // DLC_ADDON, EXPANSION, BUNDLE, SEASON, PACK
+  const TITLE_DLC_PACK_BUNDLE_SEASON = /\b(dlc|pack|bundle|season)\b/i;
+
   /**
-   * Score a candidate hit against the query title.
-   * Base = token overlap; strong bonus if candidate name or first_release_year matches intended year.
+   * Score a single candidate for matching (deterministic): normalized title similarity (token overlap),
+   * year closeness, edition/bundle penalty, category preference/penalty, optional tiny platform hint.
+   * Returns 0..1. Used by pickBestCandidate — never "first result wins".
    */
-  function scoreCandidate(
-    hit: IgdbHit,
-    queryTokens: string[],
-    expectedYear: string | null,
-    yearToken: string | null
+  export function scoreCandidateForMatch(
+    rawTitle: string,
+    cleanedTitle: string,
+    candidateName: string,
+    yearHint?: number | null,
+    hit?: IgdbHit,
+    platformHint?: string
   ): number {
-    const nameTokens = tokenize(hit.title);
-    let score = 0;
+    const queryTokens = tokenize(cleanedTitle || rawTitle);
+    const nameTokens = tokenize(String(candidateName || ""));
+    if (queryTokens.length === 0) return 0;
+    let overlap = 0;
     for (const t of queryTokens) {
-      if (t.length < 2) continue;
-      if (nameTokens.includes(t)) score += 10;
+      if (nameTokens.includes(t)) overlap++;
     }
-    if (expectedYear && yearToken) {
-      if (nameTokens.includes(yearToken)) score += 100;
-      if (hit.first_release_year !== null && hit.first_release_year === parseInt(expectedYear, 10)) score += 100;
+    let score = overlap / queryTokens.length;
+
+    if (yearHint != null && Number.isFinite(yearHint)) {
+      const candidateYear = extractYearFromTitle(candidateName);
+      if (candidateYear) {
+        const y = parseInt(candidateYear, 10);
+        const diff = Math.abs(y - yearHint);
+        if (diff === 0) score += 0.15;
+        else if (diff <= 1) score += 0.08;
+        else if (diff <= 2) score += 0.04;
+      }
     }
-    return score;
+    score = Math.min(1, score);
+
+    const rawHasEdition = EDITION_BUNDLE_PATTERN.test(String(rawTitle));
+    const candidateHasEdition = EDITION_BUNDLE_PATTERN.test(String(candidateName));
+    if (rawHasEdition !== candidateHasEdition) score -= 0.2;
+
+    if (hit?.category != null) {
+      const cat = Number(hit.category);
+      if (CATEGORY_PREFERRED.has(cat)) score += 0.05;
+      else if (CATEGORY_PENALIZED.has(cat)) {
+        const rawHasDlcPack = TITLE_DLC_PACK_BUNDLE_SEASON.test(String(rawTitle));
+        if (!rawHasDlcPack) score -= 0.25;
+      }
+    }
+
+    if (platformHint && candidateName) {
+      const p = String(platformHint).toLowerCase();
+      const nameLower = String(candidateName).toLowerCase();
+      const platformMatch =
+        (p === "steam" && nameLower.includes("steam")) ||
+        (p === "psn" && (nameLower.includes("playstation") || nameLower.includes("ps4") || nameLower.includes("ps5"))) ||
+        (p === "xbox" && nameLower.includes("xbox"));
+      if (platformMatch) score += 0.02;
+    }
+    return Math.max(0, score);
   }
 
+  export type PickBestResult =
+    | { status: "auto_matched"; candidate: IgdbHit; score: number; scored: Array<{ hit: IgdbHit; score: number }> }
+    | { status: "needs_review"; score: number; scored: Array<{ hit: IgdbHit; score: number }> }
+    | { status: "unmatched"; scored: Array<{ hit: IgdbHit; score: number }> };
+
+  /** Fail closed: only write igdb_game_id/cover_url when confidence >= 0.84. Below: queue for review, do not write. */
+  const AUTO_MATCH_THRESHOLD = 0.84;
+  const NEEDS_REVIEW_THRESHOLD = 0.65;
+
+  /**
+   * Pick best candidate from IGDB hits: score each deterministically (title similarity, year closeness, category, optional platform hint), then apply thresholds.
+   * best >= 0.84 => auto_matched; 0.65–0.84 => needs_review (do not set igdb_game_id); else unmatched.
+   * Never "first result wins" — always sort by score.
+   */
+  export function pickBestCandidate(
+    candidates: IgdbHit[],
+    rawTitle: string,
+    cleanedTitle: string,
+    yearHint?: number | null,
+    platformHint?: string | null
+  ): PickBestResult {
+    if (candidates.length === 0) return { status: "unmatched", scored: [] };
+    const scored = candidates.map((hit) => ({
+      hit,
+      score: scoreCandidateForMatch(rawTitle, cleanedTitle, hit.title, yearHint ?? hit.first_release_year ?? undefined, hit, platformHint ?? undefined),
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    if (!best) return { status: "unmatched", scored };
+    if (best.score >= AUTO_MATCH_THRESHOLD)
+      return { status: "auto_matched", candidate: best.hit, score: best.score, scored };
+    if (best.score >= NEEDS_REVIEW_THRESHOLD)
+      return { status: "needs_review", score: best.score, scored };
+    return { status: "unmatched", scored };
+  }
+
+  export type IgdbSearchBestResult = {
+    hit: IgdbHit | null;
+    confidence: number;
+    candidates: Array<{ hit: IgdbHit; score: number }>;
+  };
+
+  /**
+   * Return best match with confidence and all scored candidates.
+   * Uses igdbSearchCandidates(limit 10) then scores deterministically — never "first result wins".
+   * hit = top candidate by score; confidence = its score; candidates = full scored list (sorted by score desc).
+   */
   export async function igdbSearchBest(
     title: string,
-    options?: { rawTitle?: string }
-  ): Promise<IgdbHit | null> {
-    if (!IGDB_CLIENT_ID || !IGDB_ACCESS_TOKEN) return null;
-
+    options?: { rawTitle?: string; useGameTitleAlias?: boolean; platformHint?: string },
+    admin?: { from: (t: string) => any }
+  ): Promise<IgdbSearchBestResult> {
     const rawTitle = options?.rawTitle ?? title;
-    const tried = buildIgdbQueryCandidates(rawTitle);
+    const cleaned = cleanTitleForIgdb(rawTitle);
+    const yearHint = extractYearFromTitle(rawTitle) ? parseInt(extractYearFromTitle(rawTitle)!, 10) : undefined;
 
+    let searchTitle = title;
+    if (options?.useGameTitleAlias && admin) {
+      const aliasTitle = await resolveGameTitleAlias(admin, rawTitle);
+      if (aliasTitle) searchTitle = aliasTitle;
+    }
+
+    const rawHits = await igdbSearchCandidates(searchTitle, { rawTitle, limit: 10 });
+    const result = pickBestCandidate(rawHits, rawTitle, cleaned || rawTitle, yearHint, options?.platformHint ?? undefined);
+    const scored = "scored" in result ? result.scored : [];
+    const best = scored[0];
+    return {
+      hit: best?.hit ?? null,
+      confidence: best?.score ?? 0,
+      candidates: scored,
+    };
+  }
+
+  /** Internal: fetch top N IGDB hits (no scoring). Used by igdbSearchCandidates. */
+  async function igdbSearchBestRaw(title: string, rawTitle: string, limit = 10): Promise<IgdbHit[]> {
+    return igdbSearchCandidates(title, { rawTitle, limit });
+  }
+
+  /** Backward compat: return single best match only when auto_matched, else null. Use when caller needs one IgdbHit without committing. */
+  export async function igdbSearchBestSingle(
+    title: string,
+    options?: { rawTitle?: string; useGameTitleAlias?: boolean },
+    admin?: { from: (t: string) => any }
+  ): Promise<IgdbHit | null> {
+    const rawTitle = options?.rawTitle ?? title;
+    const { hit, confidence } = await igdbSearchBest(title, options, admin);
+    if (hit && confidence >= AUTO_MATCH_THRESHOLD) return hit;
+    return null;
+  }
+
+  /** Return multiple IGDB candidates (no commit). Used by match-validation layer to score and filter before writing. */
+  export async function igdbSearchCandidates(
+    title: string,
+    options?: { rawTitle?: string; limit?: number }
+  ): Promise<IgdbHit[]> {
+    if (!IGDB_CLIENT_ID || !IGDB_ACCESS_TOKEN) return [];
+    const rawTitle = options?.rawTitle ?? title;
+    const limit = Math.min(options?.limit ?? 10, 20);
+    const tried = buildIgdbQueryCandidates(rawTitle);
     for (const q of tried) {
       const body = `
 search "${q.replaceAll('"', "")}";
 fields ${IGDB_FIELDS};
-limit 5;
+limit ${limit};
 `;
       const res = await fetch("https://api.igdb.com/v4/games", {
         method: "POST",
@@ -236,20 +373,17 @@ limit 5;
       const text = await res.text();
       const json = text ? JSON.parse(text) : null;
       if (res.ok && Array.isArray(json) && json.length) {
-        return buildHitFromGame(json[0], title);
+        return json.map((g: any) => buildHitFromGame(g, title));
       }
     }
-
     const slug = slugifyForIgdb(cleanTitleForIgdb(rawTitle));
     if (slug) {
       const slugResult = await igdbWhereSlug(slug);
       if (Array.isArray(slugResult) && slugResult.length > 0) {
-        return buildHitFromGame(slugResult[0], title);
+        return slugResult.map((g: any) => buildHitFromGame(g, title));
       }
     }
-
-    console.log("[IGDB MISS]", { rawTitle, tried });
-    return null;
+    return [];
   }
 
   /** Strip ™ ® © and unicode variants (U+2122, U+00AE, U+00A9, etc.) for identity/search. */
@@ -260,20 +394,36 @@ limit 5;
       .trim();
   }
 
-  /** Never split 2K9/2K10-style tokens: protect with placeholder, run spacing, then re-collapse. */
+  /**
+   * Selective de-mash: keep 2K(\d+) as a single token; split known phrases (TigerWoodsPGA, PGATOUR) and camelCase.
+   * Order: collapse "2 K 10" → "2K10", protect 2K\d with placeholder, run known mashes, then camelCase/digit splits, then restore 2K.
+   */
   function deMashTitle(s: string) {
     const P = "\uE000";
     const Q = "\uE001";
-    return (s || "")
-      .replace(/\b2K(\d{1,2})\b/gi, P + "$1" + Q)
+    const t = String(s || "");
+
+    const collapse2K = t.replace(/\b2\s*K\s*(\d{1,2})\b/gi, "2K$1");
+    const protected2K = collapse2K
+      .replace(/2K\s*(\d{1,2})\b/gi, P + "$1" + Q)
+      .replace(/([A-Za-z])2K\s*(\d{1,2})(?=\s|$|[^0-9])/gi, (_, letter, num) => letter + " " + P + num + Q);
+
+    const knownMashes = splitKnownMashes(protected2K);
+
+    const spaced = knownMashes
       .replace(/([a-z])([A-Z])/g, "$1 $2")
-      .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2") // PGATour -> PGA Tour
+      .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
       .replace(/([A-Za-z])(\d)/g, "$1 $2")
-      .replace(/(\d)([A-Za-z])/g, "$1 $2")
+      .replace(/(\d)([A-Za-z])/g, "$1 $2");
+
+    return spaced
       .replace(/\uE000(\d{1,2})\uE001/gi, "2K$1")
-      .replace(/\b2 K (\d{1,2})\b/gi, "2K$1");
+      .replace(/\b2 K (\d{1,2})\b/gi, "2K$1")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
+  /** Known franchise/phrase mashes: split so IGDB search matches. Run inside deMash before generic camelCase so 2K10 stays intact. */
   function splitKnownMashes(s: string) {
     return (s || "")
       .replace(/RainbowSix/gi, "Rainbow Six")
@@ -455,12 +605,13 @@ limit 5;
   }
 
   /**
-   * Xbox-specific non-game ignore list. Prevents infinite IGDB misses for known apps (iHeartRadio, Movies & TV, etc.).
-   * When platform is xbox and title matches, skip IGDB and mark ignored (log for now).
+   * Xbox-specific non-game ignore list. Prevents apps (Movies & TV, Groove, Amazon Instant Video, iHeartRadio, etc.)
+   * from entering game identity. When platform is xbox and title matches, skip IGDB and tag content_type='app'.
    */
-  const XBOX_NON_GAME_PATTERN = /\b(iheartradio|movies\s*&\s*tv|amazon\s+instant\s+video|netflix|hulu|spotify|groove\s+music|movies\s+&\s+tv|instant\s+video)\b|amazon\s+instant|movies\s*&\s*tv/i;
+  const XBOX_NON_GAME_PATTERN = /\b(iheartradio|movies\s*&\s*tv(\s+and\s+groove)?|amazon\s+instant\s+video|netflix|hulu|spotify|groove\s+music|movies\s+&\s+tv|instant\s+video|ea\s+play\s+hub|ign\s+app|ign\s+video|peacock|hbomax|max\s+streaming|youtube\s+tv|sling\s+tv|pluto\s+tv|tubi|vudu|crunchyroll|funimation|twitch\s+app|groove)\b|amazon\s+instant|^\s*ign\s*$/i;
 
-  function isXboxNonGame(title: string): boolean {
+  /** True if title looks like an Xbox app (not a game). Use to set content_type='app' and exclude from identity. */
+  export function isXboxNonGame(title: string): boolean {
     const s = String(title || "").trim().toLowerCase();
     return XBOX_NON_GAME_PATTERN.test(s) || isLikelyNonGame(title);
   }
@@ -477,15 +628,46 @@ limit 5;
   }
 
   /**
+   * Optional lookup-first: resolve raw title via game_title_aliases to a search_title for IGDB.
+   * Use when opts.useGameTitleAlias is true. Table: game_title_aliases (raw_title, canonical_title, search_title).
+   */
+  export async function resolveGameTitleAlias(
+    admin: { from: (t: string) => any },
+    rawTitle: string
+  ): Promise<string | null> {
+    const normalized = normalizeCanonicalTitle(rawTitle);
+    const { data: byRaw } = await admin
+      .from("game_title_aliases")
+      .select("search_title")
+      .eq("raw_title", rawTitle)
+      .maybeSingle();
+    if (byRaw?.search_title) return String(byRaw.search_title);
+    const { data: byCanonical } = await admin
+      .from("game_title_aliases")
+      .select("search_title")
+      .eq("canonical_title", normalized)
+      .maybeSingle();
+    return byCanonical?.search_title ? String(byCanonical.search_title) : null;
+  }
+
+  /**
    * Get or create games row: IGDB-first (by igdb_game_id), fallback upsert by canonical_title.
-   * Spine rule: only attempt IGDB search when igdb_game_id IS NULL. If we already have a game
-   * with that canonical_title and igdb_game_id set, return it without re-searching.
-   * When opts.platform_key is set (e.g. "xbox"), resolves alias from title_aliases and uses it as IGDB search input.
+   * Spine: (1) If (platform_key, external_id) present, check igdb_match_overrides first; if found use that igdb_game_id and mark attempt = override_used.
+   * (2) Else run candidate search + scoring. If best confidence >= threshold: write igdb_game_id + cover_url.
+   * (3) Else: write nothing IGDB-related, insert into igdb_match_review_queue, mark attempt = low_confidence.
+   * Always insert a row into igdb_match_attempts for audit.
    */
   export async function upsertGameIgdbFirst(
     admin: { from: (t: string) => any },
     titleName: string,
-    opts?: { platform?: string; platform_key?: string }
+    opts?: {
+      platform?: string;
+      platform_key?: string;
+      useGameTitleAlias?: boolean;
+      source?: string;
+      external_id?: string;
+      release_id?: string;
+    }
   ): Promise<{ game_id: string; igdb_game_id: number | null }> {
     const raw = String(titleName || "").trim();
     if (!raw) throw new Error("titleName empty");
@@ -500,6 +682,79 @@ limit 5;
       return { game_id: String(existingByTitle.id), igdb_game_id: Number(existingByTitle.igdb_game_id) };
     }
 
+    const platformKey = opts?.platform_key ?? opts?.source ?? "catalog";
+    const matchNow = new Date().toISOString();
+
+    // 1) If (platform_key, external_id) present, check igdb_match_overrides first
+    if (opts?.platform_key != null && opts?.external_id != null) {
+      const { data: overrideRow } = await admin
+        .from("igdb_match_overrides")
+        .select("igdb_game_id")
+        .eq("platform_key", opts.platform_key)
+        .eq("external_id", String(opts.external_id))
+        .maybeSingle();
+      if (overrideRow?.igdb_game_id != null) {
+        const overrideIgdbId = Number(overrideRow.igdb_game_id);
+        const meta = await igdbFetchGameById(overrideIgdbId);
+        const { data: existingTitleRow, error: tErr } = await admin
+          .from("games")
+          .select("id")
+          .eq("canonical_title", canonicalNorm)
+          .maybeSingle();
+        if (tErr) throw new Error(`game lookup canonical_title: ${tErr.message}`);
+        let gameId: string;
+        if (existingTitleRow?.id) {
+          gameId = String(existingTitleRow.id);
+        } else {
+          const { data: inserted, error: insErr } = await admin
+            .from("games")
+            .insert({ canonical_title: canonicalNorm, updated_at: matchNow })
+            .select("id")
+            .single();
+          if (insErr && (insErr as any)?.code === "23505") {
+            const { data: raced } = await admin.from("games").select("id").eq("canonical_title", canonicalNorm).maybeSingle();
+            if (raced?.id) gameId = String(raced.id);
+            else throw new Error(`game insert: ${insErr.message}`);
+          } else if (insErr) throw new Error(`game insert: ${insErr.message}`);
+          else gameId = String(inserted.id);
+        }
+        const canonical = meta ? normalizeCanonicalTitle(String(meta.title || raw).trim() || raw) : canonicalNorm;
+        const patch: Record<string, unknown> = {
+          igdb_game_id: overrideIgdbId,
+          canonical_title: canonical,
+          updated_at: matchNow,
+          match_status: "override",
+          match_method: "override",
+          matched_at: matchNow,
+        };
+        if (meta?.summary != null) patch.summary = meta.summary;
+        if (meta?.developer != null) patch.developer = meta.developer;
+        if (meta?.publisher != null) patch.publisher = meta.publisher;
+        if (meta?.first_release_year != null) patch.first_release_year = meta.first_release_year;
+        if (Array.isArray(meta?.genres) && meta.genres.length) patch.genres = meta.genres;
+        if (meta?.cover_url) patch.cover_url = meta.cover_url;
+        if (meta?.category != null) patch.igdb_category = meta.category;
+        const { data: otherGame } = await admin.from("games").select("id").eq("igdb_game_id", overrideIgdbId).neq("id", gameId).maybeSingle();
+        if (otherGame?.id) await admin.from("games").update({ igdb_game_id: null, updated_at: matchNow }).eq("id", otherGame.id);
+        const { data: gameRow } = await admin.from("games").select("cover_url").eq("id", gameId).single();
+        if (gameRow?.cover_url && !shouldOverwriteCover(gameRow.cover_url)) delete patch.cover_url;
+        await admin.from("games").update(patch).eq("id", gameId);
+        await admin.from("igdb_match_attempts").insert({
+          platform_key: opts.platform_key,
+          external_id: String(opts.external_id),
+          release_id: opts?.release_id ?? null,
+          raw_title: raw,
+          cleaned_title: cleanTitleForIgdb(raw),
+          candidates: null,
+          chosen_igdb_game_id: overrideIgdbId,
+          confidence: null,
+          result: "override_used",
+          reason: null,
+        });
+        return { game_id: gameId, igdb_game_id: overrideIgdbId };
+      }
+    }
+
     // Alias resolution before IGDB: if platform_key set (e.g. xbox), use title_aliases.search_title for lookup; else fall back to raw
     const alias = opts?.platform_key ? await resolveAlias(admin, opts.platform_key, raw) : null;
     const cleaned = cleanTitleForIgdb(alias ?? raw);
@@ -511,168 +766,205 @@ limit 5;
       console.warn("[XBOX_IGNORED] Skipping IGDB for known app/non-game:", raw);
     }
 
-    // Only search IGDB when igdb_game_id IS NULL and title looks like a game (not app/demo/utility)
-    const hit = xboxIgnored || isLikelyNonGame(raw)
-      ? null
-      : expanded
-        ? await igdbSearchBest(expanded, { rawTitle: raw })
-        : cleaned
-          ? await igdbSearchBest(cleaned, { rawTitle: raw })
-          : null;
+    const searchQuery = expanded || cleaned || raw;
+    const { hit: bestHit, confidence, candidates: scored } = xboxIgnored || isLikelyNonGame(raw) || !searchQuery
+      ? { hit: null as IgdbHit | null, confidence: 0, candidates: [] as Array<{ hit: IgdbHit; score: number }> }
+      : await igdbSearchBest(searchQuery, { rawTitle: raw, useGameTitleAlias: opts?.useGameTitleAlias, platformHint: platformKey }, admin);
 
-    if (!hit) {
-      const hasTrademark = /™|®|©|\u2122|\u00AE|\u00A9|\u24B8|\u24C7/u.test(raw);
-      const hasMashy = /([a-z][A-Z])|([A-Za-z]\d)|(\d[A-Za-z])/.test(raw);
-      if (!xboxIgnored) {
-        console.warn("[IGDB miss] before/after:", {
-        raw_title: raw,
-        cleaned_title: cleaned || "(empty)",
-        platform: opts?.platform ?? opts?.platform_key ?? "(unknown)",
-        has_trademark_chars: hasTrademark,
-        has_mashy_patterns: hasMashy,
-      });
-      }
-    }
+    const result: PickBestResult = bestHit
+      ? confidence >= AUTO_MATCH_THRESHOLD
+        ? { status: "auto_matched", candidate: bestHit, score: confidence, scored }
+        : confidence >= NEEDS_REVIEW_THRESHOLD
+          ? { status: "needs_review", score: confidence, scored }
+          : { status: "unmatched", scored }
+      : { status: "unmatched", scored };
 
-    if (hit?.igdb_game_id) {
-      const canonical = normalizeCanonicalTitle(String(hit.title || raw).trim() || raw);
-      const patch: any = {
-        igdb_game_id: Number(hit.igdb_game_id),
-        canonical_title: canonical,
-        updated_at: new Date().toISOString(),
-      };
-      if (hit.summary != null) patch.summary = hit.summary;
-      if (hit.developer != null) patch.developer = hit.developer;
-      if (hit.publisher != null) patch.publisher = hit.publisher;
-      if (hit.first_release_year != null) patch.first_release_year = hit.first_release_year;
-      if (Array.isArray(hit.genres) && hit.genres.length) patch.genres = hit.genres;
-      if (hit.cover_url) patch.cover_url = hit.cover_url;
+    const matchDebug = (res: PickBestResult) =>
+      "scored" in res && res.scored.length
+        ? res.scored.map((s) => ({ igdb_game_id: s.hit.igdb_game_id, name: s.hit.title, score: s.score }))
+        : null;
 
-      const { data: existingByIgdb, error: findErr } = await admin
-        .from("games")
-        .select("id, cover_url")
-        .eq("igdb_game_id", Number(hit.igdb_game_id))
-        .maybeSingle();
-      if (findErr) throw new Error(`game lookup igdb_game_id: ${findErr.message}`);
-      if (existingByIgdb?.id) {
-        const { canonical_title: _t, ...updatePatch } = patch;
-        if (existingByIgdb.cover_url && !shouldOverwriteCover(existingByIgdb.cover_url)) delete updatePatch.cover_url;
-        const { error: updErr } = await admin.from("games").update(updatePatch).eq("id", existingByIgdb.id);
-        if (updErr) throw new Error(`game update igdb_game_id: ${updErr.message}`);
-        return { game_id: String(existingByIgdb.id), igdb_game_id: Number(hit.igdb_game_id) };
-      }
-      // Not found by igdb id: try find by canonical_title first, then update it
-      const { data: existingByTitle, error: tErr } = await admin
-        .from("games")
-        .select("id, igdb_game_id, cover_url")
-        .eq("canonical_title", patch.canonical_title)
-        .maybeSingle();
-
-      if (tErr) throw new Error(`game lookup canonical_title: ${tErr.message}`);
-
-      if (existingByTitle?.id) {
-        if (existingByTitle.igdb_game_id && existingByTitle.igdb_game_id !== patch.igdb_game_id) {
-          const { igdb_game_id: _ig, canonical_title: _t, ...safePatch } = patch;
-          if (existingByTitle.cover_url && !shouldOverwriteCover(existingByTitle.cover_url)) delete safePatch.cover_url;
-          const { error: updErr } = await admin.from("games").update(safePatch).eq("id", existingByTitle.id);
-          if (updErr) throw new Error(`game update canonical_title: ${updErr.message}`);
-          return { game_id: String(existingByTitle.id), igdb_game_id: Number(existingByTitle.igdb_game_id) };
-        }
-        const { canonical_title: _t, ...updatePatch } = patch;
-        if (existingByTitle.cover_url && !shouldOverwriteCover(existingByTitle.cover_url)) delete updatePatch.cover_url;
-        const { error: updErr } = await admin.from("games").update(updatePatch).eq("id", existingByTitle.id);
-        if (updErr) throw new Error(`game update canonical_title: ${updErr.message}`);
-        return { game_id: String(existingByTitle.id), igdb_game_id: Number(patch.igdb_game_id) };
-      }
-
-      const { data: inserted, error: insErr } = await admin
-        .from("games")
-        .insert(patch)
-        .select("id")
-        .single();
-      if (insErr) {
-        // 23505: which unique constraint collided? games_igdb_* → lookup by igdb; games_canonical_title_* → lookup by title + update metadata
-        if ((insErr as any)?.code === "23505") {
-          const msg = String((insErr as any)?.message ?? "").toLowerCase();
-
-          // games_igdb_unique / games_igdb_game_id_unique_not_null: another row has this igdb_game_id → return that row
-          const isIgdbConstraint = msg.includes("games_igdb") || msg.includes("igdb_game_id");
-          if (isIgdbConstraint) {
-            const { data: existingByIgdb, error: e2 } = await admin
-              .from("games")
-              .select("id, igdb_game_id, cover_url")
-              .eq("igdb_game_id", patch.igdb_game_id)
-              .maybeSingle();
-            if (!e2 && existingByIgdb?.id) {
-              const { igdb_game_id: _ig, canonical_title: _t, ...metaPatch } = patch;
-              if (existingByIgdb.cover_url && !shouldOverwriteCover(existingByIgdb.cover_url)) delete metaPatch.cover_url;
-              const { error: updErr } = await admin.from("games").update(metaPatch).eq("id", existingByIgdb.id);
-              if (updErr) throw new Error(`game update after igdb conflict: ${updErr.message}`);
-              return { game_id: String(existingByIgdb.id), igdb_game_id: Number(existingByIgdb.igdb_game_id) };
-            }
-          }
-
-          // games_canonical_title_unique: another row has this canonical_title → lookup by title, update metadata, return
-          const isCanonicalConstraint = msg.includes("canonical_title");
-          if (isCanonicalConstraint || !isIgdbConstraint) {
-            const { data: existingByTitle, error: t2Err } = await admin
-              .from("games")
-              .select("id, igdb_game_id, cover_url")
-              .eq("canonical_title", patch.canonical_title)
-              .maybeSingle();
-            if (!t2Err && existingByTitle?.id) {
-              if (existingByTitle.igdb_game_id && existingByTitle.igdb_game_id !== patch.igdb_game_id) {
-                const { igdb_game_id: _ig, canonical_title: _t, ...safePatch } = patch;
-                if (existingByTitle.cover_url && !shouldOverwriteCover(existingByTitle.cover_url)) delete safePatch.cover_url;
-                const { error: updErr } = await admin.from("games").update(safePatch).eq("id", existingByTitle.id);
-                if (updErr) throw new Error(`game update after conflict: ${updErr.message}`);
-                return { game_id: String(existingByTitle.id), igdb_game_id: Number(existingByTitle.igdb_game_id) };
-              }
-              const { canonical_title: _t, ...updatePatch } = patch;
-              if (existingByTitle.cover_url && !shouldOverwriteCover(existingByTitle.cover_url)) delete updatePatch.cover_url;
-              const { error: updErr } = await admin.from("games").update(updatePatch).eq("id", existingByTitle.id);
-              if (updErr) throw new Error(`game update after conflict: ${updErr.message}`);
-              return { game_id: String(existingByTitle.id), igdb_game_id: Number(patch.igdb_game_id) };
-            }
-          }
-        }
-        throw new Error(`game insert: ${insErr.message}`);
-      }
-      return { game_id: String(inserted.id), igdb_game_id: Number(patch.igdb_game_id) };
-    }
-
-    // No IGDB hit: title lookup then update or insert (use normalized title for identity)
     const normalizedRaw = normalizeCanonicalTitle(raw);
+    const source = opts?.source ?? opts?.platform_key ?? "catalog";
+
+    // Get or create game by title so we have game_id for match registry and for gating writes
     const { data: existingTitleRow, error: tErr } = await admin
       .from("games")
       .select("id")
       .eq("canonical_title", normalizedRaw)
       .maybeSingle();
-
     if (tErr) throw new Error(`game lookup canonical_title: ${tErr.message}`);
-
+    let gameId: string;
     if (existingTitleRow?.id) {
-      return { game_id: String(existingTitleRow.id), igdb_game_id: null };
+      gameId = String(existingTitleRow.id);
+    } else {
+      const { data: inserted, error: insErr } = await admin
+        .from("games")
+        .insert({ canonical_title: normalizedRaw, updated_at: matchNow })
+        .select("id")
+        .single();
+      if (insErr && (insErr as any)?.code === "23505") {
+        const { data: raced } = await admin.from("games").select("id").eq("canonical_title", normalizedRaw).maybeSingle();
+        if (raced?.id) gameId = String(raced.id);
+        else throw new Error(`game insert: ${insErr.message}`);
+      } else if (insErr) throw new Error(`game insert: ${insErr.message}`);
+      else gameId = String(inserted.id);
     }
 
-    const { data: inserted, error: insErr } = await admin
-      .from("games")
-      .insert({ canonical_title: normalizedRaw })
-      .select("id")
-      .single();
-    if (insErr) {
-      // 23505: games_canonical_title_unique — lookup by canonical_title and return existing row
-      if ((insErr as any)?.code === "23505") {
-        const { data: existingByTitle, error: t2Err } = await admin
-          .from("games")
-          .select("id")
-          .eq("canonical_title", normalizedRaw)
-          .maybeSingle();
-        if (!t2Err && existingByTitle?.id) return { game_id: String(existingByTitle.id), igdb_game_id: null };
+    if (result.status === "auto_matched" && result.candidate?.igdb_game_id) {
+      const hit = result.candidate;
+      const igdbId = Number(hit.igdb_game_id);
+
+      const { data: matchRow, error: matchInsErr } = await admin
+        .from("game_matches")
+        .insert({
+          game_id: gameId,
+          source,
+          source_title: raw,
+          source_external_id: opts?.external_id ?? null,
+          igdb_game_id: igdbId,
+          status: "proposed",
+          confidence: result.score,
+          match_debug: matchDebug(result),
+          updated_at: matchNow,
+        })
+        .select("id")
+        .single();
+
+      if (matchInsErr) {
+        console.warn("[game_matches] insert failed:", matchInsErr.message);
       }
-      throw new Error(`game insert: ${insErr.message}`);
+
+      if (confidence >= AUTO_MATCH_THRESHOLD && matchRow?.id) {
+        await admin.from("game_matches").update({ status: "rejected", updated_at: matchNow }).eq("game_id", gameId).eq("status", "accepted");
+        await admin.from("game_matches").update({ status: "accepted", resolved_at: matchNow, resolved_by: "auto", updated_at: matchNow }).eq("id", matchRow.id);
+
+        const canonical = normalizeCanonicalTitle(String(hit.title || raw).trim() || raw);
+        const patch: any = {
+          igdb_game_id: igdbId,
+          canonical_title: canonical,
+          updated_at: matchNow,
+          match_status: "auto_matched",
+          match_confidence: result.score,
+          match_method: "igdb_search",
+          match_query: searchQuery || null,
+          match_debug: matchDebug(result),
+          matched_at: matchNow,
+        };
+        if (hit.summary != null) patch.summary = hit.summary;
+        if (hit.developer != null) patch.developer = hit.developer;
+        if (hit.publisher != null) patch.publisher = hit.publisher;
+        if (hit.first_release_year != null) patch.first_release_year = hit.first_release_year;
+        if (Array.isArray(hit.genres) && hit.genres.length) patch.genres = hit.genres;
+        if (hit.cover_url) patch.cover_url = hit.cover_url;
+        if (hit.category != null) patch.igdb_category = hit.category;
+
+        const { data: otherGame } = await admin.from("games").select("id").eq("igdb_game_id", igdbId).neq("id", gameId).maybeSingle();
+        if (otherGame?.id) {
+          await admin.from("games").update({ igdb_game_id: null, updated_at: matchNow }).eq("id", otherGame.id);
+        }
+        const { data: gameRow } = await admin.from("games").select("cover_url").eq("id", gameId).single();
+        if (gameRow?.cover_url && !shouldOverwriteCover(gameRow.cover_url)) delete patch.cover_url;
+        const { error: updErr } = await admin.from("games").update(patch).eq("id", gameId);
+        if (updErr) throw new Error(`game update igdb_game_id: ${updErr.message}`);
+        await admin.from("igdb_match_attempts").insert({
+          platform_key: platformKey,
+          external_id: opts?.external_id ?? null,
+          release_id: opts?.release_id ?? null,
+          raw_title: raw,
+          cleaned_title: cleaned || raw,
+          candidates: matchDebug(result),
+          chosen_igdb_game_id: igdbId,
+          confidence: result.score,
+          result: "matched",
+          reason: null,
+        });
+        return { game_id: gameId, igdb_game_id: igdbId };
+      }
     }
-    return { game_id: String(inserted.id), igdb_game_id: null };
+
+    // needs_review or unmatched: do NOT set igdb_game_id; write nothing IGDB-related when below threshold; queue and mark attempt
+    const status = result.status === "needs_review" ? "needs_review" : "unmatched";
+    const gamesPatch: any = {
+      match_status: status,
+      match_confidence: result.status === "needs_review" ? result.score : null,
+      match_method: scored.length ? "igdb_search" : null,
+      match_query: searchQuery || null,
+      match_debug: matchDebug(result),
+      updated_at: matchNow,
+    };
+    await admin.from("games").update(gamesPatch).eq("id", gameId);
+
+    if (bestHit?.igdb_game_id) {
+      await admin.from("game_matches").insert({
+        game_id: gameId,
+        source,
+        source_title: raw,
+        source_external_id: opts?.external_id ?? null,
+        igdb_game_id: Number(bestHit.igdb_game_id),
+        status: "proposed",
+        confidence,
+        match_debug: matchDebug(result),
+        updated_at: matchNow,
+      });
+    }
+
+    const attemptResult = confidence >= NEEDS_REVIEW_THRESHOLD ? "low_confidence" : "miss";
+    await admin.from("igdb_match_attempts").insert({
+      platform_key: platformKey,
+      external_id: opts?.external_id ?? null,
+      release_id: opts?.release_id ?? null,
+      raw_title: raw,
+      cleaned_title: cleaned || raw,
+      candidates: matchDebug(result),
+      chosen_igdb_game_id: bestHit?.igdb_game_id ?? null,
+      confidence,
+      result: attemptResult,
+      reason: confidence < AUTO_MATCH_THRESHOLD ? "below_threshold" : null,
+    });
+
+    if (confidence < AUTO_MATCH_THRESHOLD && opts?.source != null && opts?.external_id != null) {
+      await admin.from("game_match_attempts").insert({
+        source: opts.source,
+        external_id: String(opts.external_id),
+        title_used: raw,
+        game_id: gameId,
+        igdb_game_id_candidate: bestHit?.igdb_game_id ?? null,
+        confidence,
+        reasons_json: matchDebug(result) ? { scored: matchDebug(result) } : null,
+        outcome: confidence >= NEEDS_REVIEW_THRESHOLD ? "pending" : "rejected",
+      });
+    }
+
+    if (confidence < AUTO_MATCH_THRESHOLD) {
+      const candidatesJson = scored.length
+        ? scored.map((s) => ({ igdb_game_id: s.hit.igdb_game_id, title: s.hit.title, score: s.score }))
+        : null;
+      await admin.from("game_match_audit").insert({
+        platform_key: opts?.platform_key ?? null,
+        release_id: opts?.release_id ?? null,
+        game_id: gameId,
+        raw_title: raw,
+        cleaned_title: cleaned || raw,
+        igdb_game_id_candidate: bestHit?.igdb_game_id ?? null,
+        igdb_title_candidate: bestHit?.title ?? null,
+        confidence,
+        decision: "pending",
+        candidates: candidatesJson,
+      });
+      await admin.from("igdb_match_review_queue").insert({
+        platform_key: opts?.platform_key ?? "catalog",
+        external_id: opts?.external_id ?? null,
+        release_id: opts?.release_id ?? null,
+        raw_title: raw,
+        cleaned_title: cleaned || raw,
+        suggested_igdb_game_id: bestHit?.igdb_game_id ?? null,
+        confidence,
+        reason: "below_threshold",
+        status: "pending",
+      });
+    }
+    return { game_id: gameId, igdb_game_id: null };
   }
 
   /**

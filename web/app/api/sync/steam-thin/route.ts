@@ -4,6 +4,11 @@ import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { ensureGameTitleOnly } from "@/lib/igdb/server";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
+import {
+  lookupGameId,
+  upsertGameExternalId,
+  gameExternalIdRow,
+} from "@/lib/game-external-ids";
 import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
 type SteamOwnedGame = {
@@ -120,11 +125,23 @@ export async function POST() {
       if (releaseId) {
         mapped += 1;
       } else {
-        // 2) No mapping: create game (title only, NO IGDB), release, then mapping
+        // 2) No mapping: resolve game_id (game_external_ids first, then title-only), then release, then mapping
         let gameId: string;
         try {
-          const res = await ensureGameTitleOnly(supabaseAdmin, title);
-          gameId = res.game_id;
+          const existingGameId = await lookupGameId(supabaseAdmin, "steam", steamExternalId);
+          if (existingGameId) {
+            gameId = existingGameId;
+          } else {
+            const res = await ensureGameTitleOnly(supabaseAdmin, title);
+            gameId = res.game_id;
+            await upsertGameExternalId(
+              supabaseAdmin,
+              gameExternalIdRow(gameId, "steam", steamExternalId, {
+                match_source: "title_only",
+                confidence: 0.8,
+              })
+            );
+          }
         } catch (e: any) {
           errors.push({ appid: steamExternalId, message: e?.message ?? "game create failed" });
           continue;

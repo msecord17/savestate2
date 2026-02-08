@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
-import { igdbSearchBest, upsertGameIgdbFirst } from "@/lib/igdb/server";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
+import { getOrCreateGameForSync, upsertGameMasterMappingIngest } from "@/lib/sync-game-resolve";
 import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
 type SteamOwnedGame = {
@@ -136,11 +136,23 @@ export async function POST() {
         updated += 1;
       }
 
-      // 3) If no release: (1) game_id (2) find by (platform_key, game_id) (3) insert with 23505 (4) upsert mapping; if mapped release_id differs, merge
+      // 3) If no release: upsert mapping metadata, then resolve game_id (game_external_refs + game_match_queue; no IGDB inline), then find/create release, then release_external_ids
       if (!releaseId) {
+        await upsertGameMasterMappingIngest(supabaseAdmin, {
+          source: "steam",
+          external_id: steamExternalId,
+          source_title: title,
+          source_platform: "Steam",
+          source_cover_url: steamHeaderImage(appid),
+        });
         try {
-          const { game_id: gid } = await upsertGameIgdbFirst(supabaseAdmin, title, { platform: "steam" });
-          gameId = gid;
+          const res = await getOrCreateGameForSync(supabaseAdmin, {
+            source: "steam",
+            external_id: steamExternalId,
+            raw_title: title,
+            platform_key: "steam",
+          });
+          gameId = res.game_id;
         } catch {
           console.warn("Steam sync: game resolution failed for", title);
           continue;
@@ -232,58 +244,6 @@ export async function POST() {
         typeof g.rtime_last_played === "number" && g.rtime_last_played > 0
           ? new Date(g.rtime_last_played * 1000).toISOString()
           : null;
-
-      // ✅ D) IGDB enrichment only when igdb_game_id IS NULL (spine rule: never re-search a good match)
-      if (gameId) {
-        const { data: gameRow } = await supabaseAdmin
-          .from("games")
-          .select("id, igdb_game_id, summary, genres, developer, publisher, first_release_year")
-          .eq("id", gameId)
-          .maybeSingle();
-
-        const needsIgdb =
-          !gameRow?.igdb_game_id &&
-          (!gameRow?.summary ||
-            !gameRow?.developer ||
-            !gameRow?.publisher ||
-            !gameRow?.first_release_year ||
-            !gameRow?.genres);
-
-        if (needsIgdb) {
-          const hit = await igdbSearchBest(title);
-
-          if (hit?.igdb_game_id) {
-            await supabaseAdmin
-              .from("games")
-              .update({
-                igdb_game_id: hit.igdb_game_id,
-                summary: gameRow?.summary ?? hit.summary,
-                genres: gameRow?.genres ?? hit.genres,
-                developer: gameRow?.developer ?? hit.developer,
-                publisher: gameRow?.publisher ?? hit.publisher,
-                first_release_year: gameRow?.first_release_year ?? hit.first_release_year,
-                updated_at: new Date().toISOString(),
-              })
-              .eq("id", gameId);
-
-            // If release cover is missing, fill from IGDB (keeps Steam header if already present)
-            if (hit.cover_url) {
-              const { data: relRow } = await supabaseAdmin
-                .from("releases")
-                .select("id, cover_url")
-                .eq("id", releaseId)
-                .maybeSingle();
-
-              if (!relRow?.cover_url) {
-                await supabaseAdmin
-                  .from("releases")
-                  .update({ cover_url: hit.cover_url, updated_at: new Date().toISOString() })
-                  .eq("id", releaseId);
-              }
-            }
-          }
-        }
-      }
 
       // C) Upsert portfolio entry (do NOT overwrite user status/rating)
       const { data: existingEntry, error: exErr } = await supabaseUser

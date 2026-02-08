@@ -174,45 +174,56 @@ release_rows as (
       else 'unknown'
     end as played_on_platform,
 
-    -- -------- Played-on generation (derived) --------
-    -- Use inline expression for retro year; cannot reference release_year alias in same SELECT.
+    -- -------- era_bucket (release-year bucket, same as get_identity_signals) --------
     case
-      when psn.release_id is not null then
-        case
-          when coalesce(psn.psn_title_platform,'') ilike '%ps5%' then 'ps5'
-          when coalesce(psn.psn_title_platform,'') ilike '%ps4%' then 'ps4'
-          when coalesce(psn.psn_title_platform,'') ilike '%ps3%' then 'ps3'
-          when coalesce(psn.psn_title_platform,'') ilike '%vita%' then 'ps_vita'
-          when coalesce(psn.psn_title_platform,'') ilike '%psp%' then 'psp'
-          else 'playstation_unknown'
-        end
-      when xb.release_id is not null then
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) is null then 'unknown'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) <= 1979 then 'early_arcade_pre_crash'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 1980 and 1989 then '8bit_home'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 1990 and 1995 then '16bit'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 1996 and 2000 then '32_64bit'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2001 and 2005 then 'ps2_xbox_gc'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2006 and 2012 then 'hd_era'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2013 and 2016 then 'ps4_xbo'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2017 and 2019 then 'switch_wave'
+      when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) >= 2020 then 'modern'
+      else 'unknown'
+    end as era_bucket,
+
+    -- -------- platform_gen (Xbox only: full bucket xbox_og, xbox_360, xbox_one, xbox_series, xbox_unknown) --------
+    case
+      when lower(o.platform_key) = 'xbox' and xb.release_id is not null then
         case
           when coalesce(xb.xbox_title_platform,'') ilike '%series%' then 'xbox_series'
           when coalesce(xb.xbox_title_platform,'') ilike '%one%' then 'xbox_one'
           when coalesce(xb.xbox_title_platform,'') ilike '%360%' then 'xbox_360'
-          else 'xbox_unknown'
+          else
+            case
+              when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) is null then 'xbox_unknown'
+              when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) < 2005 then 'xbox_og'
+              when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2005 and 2013 then 'xbox_360'
+              when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2014 and 2020 then 'xbox_one'
+              else 'xbox_series'
+            end
         end
-      when (st.release_id is not null or sf.release_id is not null) then 'pc_steam'
-      when ra.release_id is not null then
-        case
-          when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) is null then 'retro_unknown'
-          when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) <= 1979 then 'retro_early'
-          when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 1980 and 1989 then 'retro_8bit'
-          when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 1990 and 1995 then 'retro_16bit'
-          when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 1996 and 2000 then 'retro_32_64'
-          when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2001 and 2005 then 'retro_ps2_xbox_gc'
-          when coalesce(o.first_release_year, case when o.release_date is not null then extract(year from o.release_date)::int end) between 2006 and 2012 then 'retro_hd'
-          else 'retro_modern'
-        end
-      else 'unknown'
-    end as played_on_gen
+      else null
+    end as platform_gen
   from owned o
   left join psn psn on psn.user_id = o.user_id and psn.release_id = o.release_id
   left join xbox xb on xb.user_id  = o.user_id and xb.release_id  = o.release_id
   left join steam st on st.user_id = o.user_id and st.release_id = o.release_id
   left join steam_fallback sf on sf.user_id = o.user_id and sf.release_id = o.release_id
   left join ra ra on ra.user_id   = o.user_id and ra.release_id   = o.release_id
+),
+
+-- timeline_bucket = (platform_key = 'xbox' ? platform_gen : era_bucket)
+release_rows_with_bucket as (
+  select
+    rr.*,
+    case
+      when lower(rr.platform_key) = 'xbox' then coalesce(rr.platform_gen, rr.era_bucket)
+      else rr.era_bucket
+    end as timeline_bucket
+  from release_rows rr
 ),
 
 -- ==========================================
@@ -236,24 +247,24 @@ scored as (
     (
       extract(epoch from rr.last_signal_at) / 1e12
     ) as notable_score
-  from release_rows rr
-  where rr.played_on_gen <> 'unknown'
+  from release_rows_with_bucket rr
+  where rr.timeline_bucket <> 'unknown'
 ),
 
 -- ==========================================
--- 5) Aggregate by played_on_gen
+-- 5) Aggregate by timeline_bucket
 -- ==========================================
 era_stats as (
   select
     user_id,
-    played_on_gen as era,
+    timeline_bucket as era,
     count(distinct game_id) as games,
     count(distinct release_id) as releases,
     sum(psn_earned + xbox_earned + ra_earned)::int as achievements_earned,
     sum(psn_total  + xbox_total  + ra_total )::int as achievements_total,
     sum(steam_minutes + psn_playtime_minutes)::int as minutes_played
   from scored
-  group by user_id, played_on_gen
+  group by user_id, timeline_bucket
 ),
 
 -- Rank eras by dominance (games first, then releases)
@@ -268,36 +279,32 @@ ranked as (
 notable_ranked as (
   select
     s.user_id,
-    s.played_on_gen as era,
+    s.timeline_bucket as era,
     s.release_id,
     s.title,
     s.cover_url,
-    row_number() over (partition by s.user_id, s.played_on_gen order by s.notable_score desc) as rn
+    row_number() over (partition by s.user_id, s.timeline_bucket order by s.notable_score desc) as rn
   from scored s
 ),
 
--- Labels for UI
+-- Labels for UI (xbox_* + release-year era_bucket keys)
 labels as (
   select * from (values
-    ('ps5', 'PlayStation 5', '2020+'),
-    ('ps4', 'PlayStation 4', '2013–2020'),
-    ('ps3', 'PS3 / Trophy Era', '2006–2013'),
-    ('ps_vita', 'PS Vita', ''),
-    ('psp', 'PSP', ''),
     ('xbox_series', 'Xbox Series', '2020+'),
     ('xbox_one', 'Xbox One', '2013–2020'),
     ('xbox_360', 'Xbox 360 / Achievement Era', '2005–2013'),
-    ('pc_steam', 'PC (Steam)', ''),
-    ('retro_early', 'Early (Atari / Pre-crash)', '≤1979'),
-    ('retro_8bit', '8-bit Home Era', '1980–1989'),
-    ('retro_16bit', '16-bit Era', '1990–1995'),
-    ('retro_32_64', '32/64-bit Era', '1996–2000'),
-    ('retro_ps2_xbox_gc', 'PS2 / OG Xbox / GC', '2001–2005'),
-    ('retro_hd', 'Retro HD (PS3/360 gen)', '2006–2012'),
-    ('retro_modern', 'Retro (Modern Releases)', '2013+'),
-    ('playstation_unknown', 'PlayStation', ''),
+    ('xbox_og', 'OG Xbox', '2001–2005'),
     ('xbox_unknown', 'Xbox', ''),
-    ('retro_unknown', 'Retro', '')
+    ('early_arcade_pre_crash', 'Atari / Early', '≤1979'),
+    ('8bit_home', '8-bit', '1980–1989'),
+    ('16bit', '16-bit', '1990–1995'),
+    ('32_64bit', 'PS1/N64', '1996–2000'),
+    ('ps2_xbox_gc', 'PS2 era', '2001–2005'),
+    ('hd_era', 'HD era', '2006–2012'),
+    ('ps4_xbo', 'PS4 era', '2013–2016'),
+    ('switch_wave', 'Switch wave', '2017–2019'),
+    ('modern', 'Modern', '2020+'),
+    ('unknown', 'Unknown', '—')
   ) as t(era, label, years)
 )
 

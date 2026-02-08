@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { cleanTitleForIgdb, expandCommonAbbrevsForSearch, igdbSearchBest } from "@/lib/igdb/server";
+import { cleanTitleForIgdb, expandCommonAbbrevsForSearch, igdbSearchBestSingle } from "@/lib/igdb/server";
 
 export async function POST(req: Request) {
   const supabaseAdmin = createClient(
@@ -39,7 +39,7 @@ export async function POST(req: Request) {
     const q1 = (expanded || cleaned || "").trim() || raw;
     const q2 = cleanTitleForIgdb(raw.replace(/[:\-].*$/, "")).trim() || raw;
 
-    const hit = (await igdbSearchBest(q1)) ?? (await igdbSearchBest(q2));
+    const hit = (await igdbSearchBestSingle(q1)) ?? (await igdbSearchBestSingle(q2));
     if (!hit?.igdb_game_id) {
       skipped++;
       continue;

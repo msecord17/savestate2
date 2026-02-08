@@ -10,7 +10,8 @@ alwaysApply: false
 
 ## Notes (to avoid common bugs)
 
-- **release_external_ids is the authority:** Always resolve `release_id` from the platform external id (e.g. Steam appid) **first** via `release_external_ids(source, external_id)`. Never create a release before checking the mapping; re-running sync must not create duplicates.
+- **game_external_ids is canonical identity:** Resolve `game_id` first via `game_external_ids(source, external_id)`. If missing, resolve via IGDB (or title-only for steam-thin), then **write** `game_external_ids(source, external_id, game_id)`. Only after `game_id` is resolved, find/create release by `(platform_key, game_id)` and then `release_external_ids` for idempotency.
+- **release_external_ids** remains the authority for “which release row” (platform id → release_id). Never create a release before resolving `game_id`; re-running sync must not create duplicate games.
 - **Steam:** Use **steam-thin** (`/api/sync/steam-thin`) as the default sync. Keep full sync (`/api/sync/steam`) and lighter sync (`/api/steam/sync`) for **debugging only**; do not wire them as the primary user-facing sync.
 
 ## DB invariants (lock the spine)
@@ -19,6 +20,7 @@ Enable these indexes **only after** bulk repair (merge duplicate releases, dedup
 
 - **games:** unique `games(igdb_game_id)` where not null  
 - **releases:** unique `releases(platform_key, game_id)`  
+- **game_external_ids:** unique `game_external_ids(source, external_id)`. Canonical mapping: platform id → `games.id`. Sync resolves game first, then release.
 - **release_external_ids:** unique `release_external_ids(source, external_id)`. Table columns are **release_id, source, external_id** only; align all selects/inserts/updates with this schema.
 
 Sync is idempotent by construction when these hold.
@@ -35,7 +37,7 @@ Apply this order for **every** platform (PSN, Xbox, Steam):
    If a row exists, use that `release_id` and skip to step 4.
 
 3. **If no release exists yet**
-   - Resolve IGDB best match → get/create `games` row (by `igdb_game_id` when possible, else `canonical_title`).
+   - Resolve **game_id**: lookup `game_external_ids(source, external_id)`. If found, use that `game_id`. Else resolve via IGDB (or title-only for steam-thin) → get/create `games` row → **write `game_external_ids(source, external_id, game_id)`**.
    - Get/create `releases` row by `(platform_key, game_id)` (one release per platform per game).
    - Write `release_external_ids(release_id, source, external_id)` so the next run hits step 2.
 

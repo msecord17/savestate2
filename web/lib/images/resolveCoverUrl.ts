@@ -50,7 +50,8 @@ export type CoverInput = {
 
   /**
    * Cover precedence: game.cover_url (IGDB canonical) first, then release.cover_url (platform fallback), then placeholder.
-   * RA / other provider art must never win over IGDB.
+   * Callers must never pass RA (RetroAchievements) images as game_cover_url or cover_url when an IGDB/game cover exists;
+   * RA art is for achievements only, not primary box/card art.
    * Ladder: 1) game.cover_url (if valid) 2) release.cover_url 3) Steam header 4) PSN icon 5) IGDB 6) placeholder
    */
   export function resolveCoverUrl(input: CoverInput): string {

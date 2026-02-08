@@ -11,6 +11,8 @@ type TitleOut = {
   devices?: string[];
   /** Resolved generation: Xbox 360 | Xbox One | Xbox Series. From contract version + devices when available. */
   platform_label?: XboxPlatformLabel;
+  /** When Microsoft catalog says this is not a game; use to tag content_type='app' and exclude from identity. */
+  isGame?: boolean;
   achievements_earned?: number;
   achievements_total?: number;
   gamerscore_earned?: number;
@@ -227,6 +229,9 @@ async function fetchAchievementHistoryTitles(authorization: string, xuid: string
     const text = await res.text();
     const json = jsonOrNull(text);
 
+    // Declare pageTitles first (before any use) to avoid temporal dead zone
+    const pageTitles = Array.isArray(json?.titles) ? json.titles : [];
+
     // Check for continuation token in headers too
     const headerContinuationToken = res.headers.get("X-Continuation-Token") ?? 
                                     res.headers.get("x-continuation-token") ??
@@ -239,10 +244,7 @@ async function fetchAchievementHistoryTitles(authorization: string, xuid: string
       break;
     }
 
-    // Add titles from this page; tag each with source platform for generation (360 vs One/Series)
-    const pageTitles = Array.isArray(json?.titles) ? json.titles : [];
-
-    // Debug: log response structure (always log first page per platform)
+    // Debug: log response structure (always log first page per platform). pageTitles declared above.
     const debugInfo: any = {
       platform: platform.name,
       contractVersion: platform.version,
@@ -456,12 +458,21 @@ export async function GET() {
       isoOrNull(t?.lastUnlockTime) ??
       null;
 
+    const isGame =
+      t?.isGame === true ||
+      (
+        (t?.isGame === false ? false : undefined) ??
+        (t?.type != null ? String(t.type).toLowerCase() === "game" : undefined) ??
+        (t?.titleType != null ? String(t.titleType).toLowerCase() === "game" : undefined)
+      );
+
     return {
       name: String(titleName),
       titleId,
       pfTitleId: titleId, // keep compatibility with your earlier model
       devices: Array.isArray(t?.devices) ? t.devices : undefined,
       platform_label: xboxPlatformLabelFromRaw(t),
+      isGame: isGame === false ? false : isGame === true ? true : undefined,
       achievements_earned: achievementsEarned,
       achievements_total: achievementsTotal,
       gamerscore_earned: gamerscoreEarned,

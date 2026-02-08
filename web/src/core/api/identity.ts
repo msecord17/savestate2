@@ -24,6 +24,7 @@ export async function fetchTimeline(
   try {
     const params = new URLSearchParams({ mode });
     if (sort !== "dominance") params.set("sort", sort);
+    params.set("t", String(Date.now())); // cache killer: confirm API returns platform_gen
     const data = await apiGet<TimelineResponse>(
       `/api/identity/timeline?${params.toString()}`,
       { credentials: "include" }

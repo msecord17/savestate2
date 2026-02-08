@@ -17,6 +17,7 @@ import {
   type ArchetypeResult,
 } from "@/lib/identity/archetypes";
 import type { CollectorArchetype } from "@/lib/identity/collector-archetypes";
+import { toEraKey } from "@/lib/identity/eras";
 
 export type IdentityRpcRow = {
   platform_counts: {
@@ -171,22 +172,24 @@ export function identitySignalsFromGetIdentitySignalsJson(json: GetIdentitySigna
   };
 }
 
-/** Map primary_era_key from get_identity_signals to strip ERA_THEME key (atari, nes, ps2, modern, etc.). */
+/** Map primary_era_key from get_identity_signals to strip ERA_THEME key. Normalizes legacy keys via toEraKey. */
+const ERA_KEY_TO_THEME: Record<string, string> = {
+  gen1_1972_1977: "atari",
+  gen2_1976_1984: "nes",
+  gen3_1983_1992: "nes",
+  gen4_1987_1996: "snes",
+  gen5a_1993_1996: "ps1",
+  gen5b_1996_2001: "ps1",
+  gen6_1998_2005: "ps2",
+  gen7_2005_2012: "ps3_360",
+  gen8_2013_2019: "modern",
+  gen9_2020_plus: "modern",
+  unknown: "modern",
+};
+
 export function eraKeyFromPrimaryEra(primary_era_key: string | null | undefined): string {
-  const map: Record<string, string> = {
-    early_arcade_pre_crash: "atari",
-    "8bit_home": "nes",
-    "16bit": "snes",
-    "32_64bit": "ps1",
-    ps2_xbox_gc: "ps2",
-    hd_era: "ps3_360",
-    ps4_xbo: "modern",
-    switch_wave: "modern",
-    modern: "modern",
-    unknown: "modern",
-  };
-  const key = primary_era_key ?? "modern";
-  return map[key] ?? "modern";
+  const canonical = toEraKey(primary_era_key ?? "unknown");
+  return ERA_KEY_TO_THEME[canonical] ?? "modern";
 }
 
 /** Map computeArchetypes() result + era_key to IdentitySummaryApiResponse. */
