@@ -26,7 +26,7 @@ export async function POST(req: Request) {
 
   const source = typeof body?.source === "string" ? body.source.trim() : "";
   const external_id = typeof body?.external_id === "string" ? body.external_id.trim() : "";
-  const igdbGameId = body?.igdb_game_id != null ? Number(body.igdb_game_id) : null;
+  const igdbGameId = body?.igdb_game_id;
   const locked = body?.locked !== false;
 
   if (!source || !external_id) {
@@ -35,7 +35,19 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
-  if (!Number.isFinite(igdbGameId) || igdbGameId <= 0) {
+
+  // Guard null/undefined first
+  if (igdbGameId == null) {
+    return NextResponse.json(
+      { error: "Missing or invalid igdb_game_id" },
+      { status: 400 }
+    );
+  }
+
+  // Coerce to number (handles string inputs too)
+  const igdbId = typeof igdbGameId === "number" ? igdbGameId : Number(igdbGameId);
+
+  if (!Number.isFinite(igdbId) || igdbId <= 0) {
     return NextResponse.json(
       { error: "Missing or invalid igdb_game_id" },
       { status: 400 }
@@ -45,14 +57,14 @@ export async function POST(req: Request) {
   const admin = adminClient();
   const now = new Date().toISOString();
 
-  const hit = await igdbFetchGameById(igdbGameId);
+  const hit = await igdbFetchGameById(igdbId);
   if (!hit) {
     return NextResponse.json({ error: "IGDB game not found" }, { status: 404 });
   }
 
   const canonicalTitle = normalizeCanonicalTitle(String(hit.title || "").trim());
   const patch: Record<string, unknown> = {
-    igdb_game_id: igdbGameId,
+    igdb_game_id: igdbId,
     canonical_title: canonicalTitle,
     summary: hit.summary ?? null,
     developer: hit.developer ?? null,
@@ -78,7 +90,7 @@ export async function POST(req: Request) {
   const { data: existingByIgdb } = await admin
     .from("games")
     .select("id")
-    .eq("igdb_game_id", igdbGameId)
+    .eq("igdb_game_id", igdbId)
     .maybeSingle();
 
   let resolvedGameId: string | null = null;
@@ -143,7 +155,7 @@ export async function POST(req: Request) {
   const mappingPayload = {
     source,
     external_id,
-    igdb_game_id: igdbGameId,
+    igdb_game_id: igdbId,
     status,
     confidence: 1,
     method: "manual",
@@ -176,7 +188,7 @@ export async function POST(req: Request) {
     mapping_id: upserted?.id,
     source,
     external_id,
-    igdb_game_id: igdbGameId,
+    igdb_game_id: igdbId,
     status,
     canonical_game_id: resolvedGameId ?? undefined,
   });
