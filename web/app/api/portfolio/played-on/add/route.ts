@@ -5,15 +5,17 @@ import { supabaseRouteClient } from "@/lib/supabase/route-client";
 type Body = {
   release_id: string;
   hardware_id: string;
-  source?: "manual" | "ra_default" | "ra_manual_override" | "system_detected";
+  source?: string;
 };
 
-const ALLOWED_SOURCES = new Set<NonNullable<Body["source"]>>([
-  "manual",
-  "ra_default",
-  "ra_manual_override",
-  "system_detected",
-]);
+const SOURCE_VALUES = ["manual", "ra_default", "ra_manual_override", "system_detected"] as const;
+type Source = (typeof SOURCE_VALUES)[number];
+
+const ALLOWED_SOURCES = new Set<Source>(SOURCE_VALUES);
+
+function isSource(x: unknown): x is Source {
+  return typeof x === "string" && ALLOWED_SOURCES.has(x as Source);
+}
 
 export async function POST(req: Request) {
   try {
@@ -31,8 +33,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Missing release_id or hardware_id" }, { status: 400 });
     }
 
-    const sourceRaw = (body.source ?? "manual") as Body["source"];
-    const source = ALLOWED_SOURCES.has(sourceRaw) ? sourceRaw : "manual";
+    const source: Source = isSource(body.source) ? body.source : "manual";
 
     // Verify hardware exists
     const { data: hw } = await supabaseServer
