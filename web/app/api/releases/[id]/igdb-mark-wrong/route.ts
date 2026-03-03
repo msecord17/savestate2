@@ -55,14 +55,14 @@ export async function POST(
 
     const { data: extRows } = await admin
       .from("release_external_ids")
-      .select("source, external_id")
+      .select("source, external_id, platform_key")
       .eq("release_id", releaseId);
 
     const now = new Date().toISOString();
     const inserted: Array<{ platform_key: string; external_id: string }> = [];
 
     for (const row of extRows ?? []) {
-      const pk = String((row?.source ?? row?.platform_key ?? platformKey) || "").trim();
+      const pk = String((row?.platform_key ?? platformKey) || "").trim();
       const extId = String(row?.external_id ?? "").trim();
       if (!pk || !extId) continue;
 
