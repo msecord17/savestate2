@@ -118,9 +118,23 @@ export function IdentityStrip({
   className,
 }: {
   chips: IdentityChip[];
-  onOpenDrawer?: () => void;
+  onOpenDrawer?: (chip?: IdentityChip) => void;
   className?: string;
 }) {
+  const reduce = useReducedMotion();
+
+  const stripEnter = reduce
+    ? undefined
+    : { initial: { opacity: 0, y: 4 }, animate: { opacity: 1, y: 0 }, transition: { duration: 0.18 } };
+
+  const chipButtonClass = cn(
+    "flex items-center gap-2 flex-nowrap min-h-[44px] min-w-[44px] shrink-0",
+    "rounded-full border border-transparent",
+    "focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-neutral-400 dark:focus-visible:ring-neutral-500",
+    "hover:border-neutral-300/80 dark:hover:border-white/20",
+    "touch-manipulation"
+  );
+
   const rowContent = (
     <div
       className={cn(
@@ -130,43 +144,33 @@ export function IdentityStrip({
         "[-webkit-overflow-scrolling:touch]"
       )}
     >
-      {chips.map((c) => (
-        <ChipContent key={c.key} c={c} />
-      ))}
+      {chips.map((c) =>
+        onOpenDrawer && !c.disabled ? (
+          <motion.button
+            key={c.key}
+            type="button"
+            {...(reduce ? {} : pressable)}
+            {...(reduce ? {} : hoverLift)}
+            onClick={() => onOpenDrawer(c)}
+            className={chipButtonClass}
+          >
+            <ChipContent c={c} />
+          </motion.button>
+        ) : (
+          <span key={c.key} className="min-h-[44px] shrink-0">
+            <ChipContent c={c} />
+          </span>
+        )
+      )}
     </div>
   );
-
-  const reduce = useReducedMotion();
-
-  const stripEnter = reduce
-    ? undefined
-    : { initial: { opacity: 0, y: 4 }, animate: { opacity: 1, y: 0 }, transition: { duration: 0.18 } };
 
   return (
     <motion.section
       className={cn("w-full", "px-4 pt-3", className)}
       {...(stripEnter ?? {})}
     >
-      {onOpenDrawer && !chips.some((c) => c.disabled) ? (
-        <motion.button
-          type="button"
-          {...(reduce ? {} : pressable)}
-          {...(reduce ? {} : hoverLift)}
-          onClick={onOpenDrawer}
-          className={cn(
-            "w-full text-left",
-            "min-h-[44px] min-w-[44px]",
-            "rounded-xl border border-transparent",
-            "focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-neutral-400 dark:focus-visible:ring-neutral-500",
-            "hover:border-neutral-300/80 dark:hover:border-white/20",
-            "touch-manipulation"
-          )}
-        >
-          {rowContent}
-        </motion.button>
-      ) : (
-        <div className="min-h-[44px]">{rowContent}</div>
-      )}
+      <div className="min-h-[44px]">{rowContent}</div>
     </motion.section>
   );
 }

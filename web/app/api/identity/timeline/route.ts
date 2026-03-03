@@ -1,27 +1,10 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { supabaseServer } from "@/lib/supabase/server";
-import { ORIGIN_ORDER } from "@/lib/identity/era";
-import { ERA_META } from "@/lib/identity/eras";
+import { ORIGIN_BUCKET_META, ORIGIN_BUCKET_ORDER } from "@/lib/identity/era";
+import { normalizeTimeline } from "@/lib/identity/normalize-timeline";
+import { normalizeOriginTimeline } from "@/lib/identity/normalizeOriginTimeline";
 import type { EraTimelineItem, TimelineResponse } from "@/lib/identity/types";
-
-/** Payload from get_origin_timeline RPC: stats and standouts per origin_bucket */
-type OriginTimelinePayload = {
-  stats?: Record<string, { games: number; releases: number }> | null;
-  standouts?: Record<
-    string,
-    Array<{
-      release_id: string;
-      title: string;
-      cover_url: string | null;
-      played_on: string | null;
-      earned?: number;
-      total?: number;
-      minutes_played?: number;
-      score?: number;
-    }>
-  > | null;
-};
 
 export async function GET(req: Request) {
   const supabase = await supabaseRouteClient();
@@ -40,15 +23,17 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: rpcErr.message }, { status: 500 });
   }
 
-  const pl = (payload ?? null) as OriginTimelinePayload | null;
-  const stats = pl?.stats ?? {};
-  const standouts = pl?.standouts ?? {};
+  const { origin } = normalizeTimeline(payload);
+  const { stats, standouts } = normalizeOriginTimeline(origin);
+  const s = stats ?? {};
+  const so = standouts ?? {};
 
-  const bucketKeys = Object.keys(stats).filter((k) => k !== "unknown");
-  const eraStats = bucketKeys.map((key) => ({
+  const buckets = ORIGIN_BUCKET_ORDER.filter((k) => k !== "unknown");
+
+  const eraStats = buckets.map((key) => ({
     key,
-    games: Number((stats[key] as { games?: number })?.games ?? 0),
-    releases: Number((stats[key] as { releases?: number })?.releases ?? 0),
+    games: Number((s[key] as { games?: number })?.games ?? 0),
+    releases: Number((s[key] as { releases?: number })?.releases ?? 0),
   }));
   eraStats.sort((a, b) => {
     if (b.games !== a.games) return b.games - a.games;
@@ -59,9 +44,11 @@ export async function GET(req: Request) {
     rankByKey[s.key] = i + 1;
   });
 
-  const eras: EraTimelineItem[] = eraStats.map(({ key, games, releases }) => {
-    const meta = ERA_META[key as keyof typeof ERA_META];
-    const notableList = Array.isArray(standouts[key]) ? standouts[key]! : [];
+  const eras: EraTimelineItem[] = buckets.map((bucketKey) => {
+    const meta = ORIGIN_BUCKET_META[bucketKey];
+    const games = Number((s[bucketKey] as { games?: number })?.games ?? 0);
+    const releases = Number((s[bucketKey] as { releases?: number })?.releases ?? 0);
+    const notableList = Array.isArray(so[bucketKey]) ? so[bucketKey]! : [];
     const notable = notableList.slice(0, 3).map((n) => ({
       release_id: String(n.release_id ?? ""),
       title: String(n.title ?? "Untitled"),
@@ -73,10 +60,10 @@ export async function GET(req: Request) {
     }));
 
     return {
-      era: key,
-      label: meta?.label ?? key,
-      years: meta?.years ?? "",
-      rank: rankByKey[key] ?? 0,
+      era: bucketKey,
+      label: meta?.title ?? bucketKey,
+      years: meta?.sub ?? "",
+      rank: rankByKey[bucketKey] ?? 0,
       games,
       releases,
       topSignals: [],
@@ -86,8 +73,8 @@ export async function GET(req: Request) {
 
   if (sortOrder === "chronological") {
     eras.sort((a, b) => {
-      const ia = ORIGIN_ORDER.indexOf(a.era);
-      const ib = ORIGIN_ORDER.indexOf(b.era);
+      const ia = ORIGIN_BUCKET_ORDER.indexOf(a.era);
+      const ib = ORIGIN_BUCKET_ORDER.indexOf(b.era);
       return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
     });
   } else {

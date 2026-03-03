@@ -15,31 +15,29 @@ export async function GET() {
   }
 
   const { data, error } = await supabase
-  .from("portfolio_entries")
-  .select(`
-    release_id,
-    status,
-    rating,
-    playtime_minutes,
-    last_played_at,
-    updated_at,
-    releases (
+    .from("portfolio_entries")
+    .select(`
       id,
-      display_title,
-      platform_name,
-      platform_key,
-      cover_url,
-      games (
-        first_release_year,
-        developer,
-        genres,
-        cover_url
+      release_id,
+      created_at,
+      status,
+      playtime_minutes,
+      release:releases(
+        id,
+        display_title,
+        platform_key,
+        cover_url,
+        release_date,
+        game:games(
+          id,
+          canonical_title,
+          cover_url,
+          first_release_year
+        )
       )
-    )
-  `)
-  
-  .eq("user_id", user.id)
-  .order("updated_at", { ascending: false });
+    `)
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
 
 
   if (error) {

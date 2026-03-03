@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 /**
  * GET: list games where match_status = 'needs_review' (for review queue UI).
  */
 export async function GET() {
-  const admin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
+  const admin = adminClient();
 
   const { data, error } = await admin
     .from("games")
@@ -25,10 +26,10 @@ export async function GET() {
  * POST: { game_id, igdb_game_id } — set igdb_game_id and match_status = 'verified' on the game.
  */
 export async function POST(req: Request) {
-  const admin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
+  const admin = adminClient();
 
   let body: { game_id?: string; igdb_game_id?: number };
   try {

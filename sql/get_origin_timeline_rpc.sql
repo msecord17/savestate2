@@ -1,9 +1,10 @@
--- RPC: get_origin_timeline(p_user_id uuid) returns jsonb
--- Payload: { stats: { [origin_bucket]: { games, releases } }, standouts: { [origin_bucket]: [ { release_id, title, cover_url, played_on, score } ] } }
--- Canonical-game-based: group by game_id, era from games.first_release_year only, exclude non-games (content_type), top 3 per era with owned fallback score.
--- Used by GET /api/identity/timeline.
+-- 0) Lock down the UUID-based function (it should NOT be callable by anon/public)
+revoke all on function public.get_origin_timeline(uuid) from public;
+revoke all on function public.get_origin_timeline(uuid) from anon;
+grant execute on function public.get_origin_timeline(uuid) to authenticated;
 
-create or replace function public.get_origin_timeline(p_user_id uuid)
+-- 1) Public-safe version keyed by username (only returns data for profile_public users)
+create or replace function public.get_public_origin_timeline(p_username text)
 returns jsonb
 language sql
 security definer
@@ -11,7 +12,21 @@ set search_path = public
 stable
 as $$
 with
--- All owned releases with game; era from games.first_release_year only. Exclude non-games. Standouts require IGDB match + known year.
+-- Resolve username -> user_id ONLY if profile is public.
+pub as (
+  select p.user_id
+  from public.profiles p
+  where p.profile_public = true
+    and p.username is not null
+    and lower(p.username) = lower(trim(p_username))
+  limit 1
+),
+
+-- If not public/not found, return empty.
+guard as (
+  select user_id from pub
+),
+
 owned as (
   select
     pe.user_id,
@@ -21,17 +36,18 @@ owned as (
     r.display_title,
     coalesce(g.cover_url, r.cover_url) as cover_url,
     g.first_release_year as origin_year
-  from portfolio_entries pe
-  join releases r on r.id = pe.release_id
-  join games g on g.id = r.game_id
-  where pe.user_id = p_user_id
+  from guard
+  join public.portfolio_entries pe on pe.user_id = guard.user_id
+  join public.releases r on r.id = pe.release_id
+  left join public.release_classifications rc on rc.release_id = r.id
+  join public.games g on g.id = r.game_id
+  where coalesce(rc.kind, 'game'::public.release_kind) = 'game'::public.release_kind
     and (r.content_type is null or lower(trim(r.content_type)) = 'game')
     and (g.igdb_category is null or g.igdb_category = 0)
     and g.igdb_game_id is not null
     and g.first_release_year is not null
 ),
 
--- Drop Xbox non-game apps by title patterns (legacy safeguard)
 owned_clean as (
   select *
   from owned
@@ -48,20 +64,18 @@ owned_clean as (
   )
 ),
 
--- Bucket by game origin only (first_release_year). Non-overlapping ranges.
 bucketed as (
   select
     *,
     case
       when origin_year is null then 'unknown'
       when origin_year between 1972 and 1977 then 'gen1_1972_1977'
-      when origin_year between 1976 and 1984 then 'gen2_1976_1984'
-      when origin_year between 1983 and 1992 then 'gen3_1983_1992'
-      when origin_year between 1987 and 1992 then 'gen4_1987_1996'
-      when origin_year between 1993 and 1996 then 'gen5a_1993_1996'
-      when origin_year between 1996 and 2001 then 'gen5b_1996_2001'
-      when origin_year between 1998 and 2005 then 'gen6_1998_2005'
-      when origin_year between 2005 and 2012 then 'gen7_2005_2012'
+      when origin_year between 1978 and 1982 then 'gen2_1978_1982'
+      when origin_year between 1983 and 1989 then 'gen3_1983_1989'
+      when origin_year between 1990 and 1995 then 'gen4_1990_1995'
+      when origin_year between 1996 and 1999 then 'gen5_1996_1999'
+      when origin_year between 2000 and 2005 then 'gen6_2000_2005'
+      when origin_year between 2006 and 2012 then 'gen7_2006_2012'
       when origin_year between 2013 and 2019 then 'gen8_2013_2019'
       when origin_year >= 2020 then 'gen9_2020_plus'
       else 'unknown'
@@ -78,13 +92,14 @@ psn as (
     coalesce(p.trophies_earned, 0)::int as earned,
     coalesce(p.trophies_total, 0)::int as total,
     p.last_updated_at::timestamptz as last_signal_at
-  from psn_title_progress p
-  left join release_external_ids re
+  from guard
+  join public.psn_title_progress p on p.user_id = guard.user_id
+  left join public.release_external_ids re
     on re.source = 'psn'
    and re.external_id = p.np_communication_id::text
-  where p.user_id = p_user_id
-    and coalesce(p.release_id, re.release_id) is not null
+  where coalesce(p.release_id, re.release_id) is not null
 ),
+
 xbox as (
   select
     x.user_id,
@@ -94,13 +109,14 @@ xbox as (
     coalesce(x.achievements_earned, 0)::int as earned,
     coalesce(x.achievements_total, 0)::int as total,
     coalesce(x.last_played_at, x.last_updated_at)::timestamptz as last_signal_at
-  from xbox_title_progress x
-  left join release_external_ids re
+  from guard
+  join public.xbox_title_progress x on x.user_id = guard.user_id
+  left join public.release_external_ids re
     on re.source = 'xbox'
    and re.external_id = x.title_id::text
-  where x.user_id = p_user_id
-    and coalesce(x.release_id, re.release_id) is not null
+  where coalesce(x.release_id, re.release_id) is not null
 ),
+
 steam as (
   select
     s.user_id,
@@ -110,9 +126,10 @@ steam as (
     0::int as earned,
     0::int as total,
     s.last_updated_at::timestamptz as last_signal_at
-  from steam_title_progress s
-  where s.user_id = p_user_id
+  from guard
+  join public.steam_title_progress s on s.user_id = guard.user_id
 ),
+
 steam_fallback as (
   select
     pe.user_id,
@@ -122,18 +139,28 @@ steam_fallback as (
     0::int as earned,
     0::int as total,
     null::timestamptz as last_signal_at
-  from portfolio_entries pe
-  join releases r on r.id = pe.release_id and lower(r.platform_key) = 'steam'
-  left join steam_title_progress s
+  from guard
+  join public.portfolio_entries pe on pe.user_id = guard.user_id
+  join public.releases r on r.id = pe.release_id and lower(r.platform_key) = 'steam'
+  left join public.steam_title_progress s
     on s.user_id = pe.user_id and s.release_id = pe.release_id
-  where pe.user_id = p_user_id
-    and s.release_id is null
+  where s.release_id is null
 ),
+
 ra as (
   select
     rac.user_id,
     rac.release_id,
-    'Played on: RetroAchievements'::text as played_on,
+    ('Played on: ' || coalesce(
+      (
+        select h.display_name
+        from public.profiles p
+        join public.hardware h on h.id = p.default_ra_hardware_id
+        where p.user_id = (select user_id from guard limit 1)
+        limit 1
+      ),
+      'RetroAchievements'
+    ))::text as played_on,
     0::int as minutes_played,
     coalesce((
       select count(*)
@@ -145,8 +172,8 @@ ra as (
       from jsonb_array_elements(coalesce(rac.payload->'achievements','[]'::jsonb)) a
     ), 0)::int as total,
     rac.fetched_at::timestamptz as last_signal_at
-  from ra_achievement_cache rac
-  where rac.user_id = p_user_id
+  from guard
+  join public.ra_achievement_cache rac on rac.user_id = guard.user_id
 ),
 
 signals_raw as (
@@ -173,7 +200,6 @@ signals_best as (
     last_signal_at desc nulls last
 ),
 
--- Score per release: signal-based or owned fallback (so games with no signals still appear)
 scored_releases as (
   select
     b.origin_bucket,
@@ -200,7 +226,6 @@ scored_releases as (
   where b.origin_bucket <> 'unknown'
 ),
 
--- One row per game per era: best release by completion -> playtime -> recency
 game_best as (
   select distinct on (origin_bucket, game_id)
     origin_bucket,
@@ -232,7 +257,6 @@ era_stats as (
   group by origin_bucket
 ),
 
--- Rank by completion -> playtime -> recency; take top 3 per era
 ranked as (
   select
     *,
@@ -246,29 +270,42 @@ ranked as (
   from game_best
 )
 
-select jsonb_build_object(
-  'stats', coalesce((select jsonb_object_agg(origin_bucket, jsonb_build_object('games', games, 'releases', releases)) from era_stats), '{}'::jsonb),
-  'standouts', coalesce((
-    select jsonb_object_agg(origin_bucket, standout)
-    from (
-      select
-        origin_bucket,
-        jsonb_agg(jsonb_build_object(
-          'release_id', release_id,
-          'title', title,
-          'cover_url', cover_url,
-          'played_on', played_on,
-          'earned', earned,
-          'total', total,
-          'minutes_played', minutes_played,
-          'score', score
-        ) order by rn) as standout
-      from ranked
-      where rn <= 3
-      group by origin_bucket
-    ) x
-  ), '{}'::jsonb)
-);
+select
+  coalesce(
+    (
+      select jsonb_build_object(
+        'stats', coalesce(
+          (select jsonb_object_agg(origin_bucket, jsonb_build_object('games', games, 'releases', releases)) from era_stats),
+          '{}'::jsonb
+        ),
+        'standouts', coalesce((
+          select jsonb_object_agg(origin_bucket, standout)
+          from (
+            select
+              origin_bucket,
+              jsonb_agg(jsonb_build_object(
+                'release_id', release_id,
+                'title', title,
+                'cover_url', cover_url,
+                'played_on', played_on,
+                'earned', earned,
+                'total', total,
+                'minutes_played', minutes_played,
+                'score', score
+              ) order by rn) as standout
+            from ranked
+            where rn <= 3
+            group by origin_bucket
+          ) x
+        ), '{}'::jsonb)
+      )
+    ),
+    jsonb_build_object('stats','{}'::jsonb,'standouts','{}'::jsonb)
+  );
 $$;
 
-comment on function public.get_origin_timeline(uuid) is 'Origin-era timeline: stats + top 3 standout games per bucket (by game_id, era from games.first_release_year). Excludes non-game content_type. Owned fallback score when no signals. Used by GET /api/identity/timeline.';
+comment on function public.get_public_origin_timeline(text)
+is 'PUBLIC-SAFE timeline by username. Only returns data when profiles.profile_public=true for that username.';
+
+-- Public-safe to expose
+grant execute on function public.get_public_origin_timeline(text) to anon, authenticated;

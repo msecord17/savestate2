@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { supabaseServer } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
+import { recordSyncEnd, recordSyncStart } from "@/lib/sync/record-run";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
-import { releaseExternalIdRow } from "@/lib/release-external-ids";
 import { getOrCreateGameForSync, upsertGameMasterMappingIngest } from "@/lib/sync-game-resolve";
 import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
@@ -187,8 +188,7 @@ async function ensureReleaseForPsnTitle(
     psnExternalId: string; // real npCommunicationId/titleId OR synthetic id
     platformLabel: string; // PS5/PS4/...
     source_cover_url?: string | null;
-  },
-  retried23505?: boolean
+  }
 ): Promise<string> {
   const { admin, titleName, psnExternalId, platformLabel, source_cover_url } = opts;
 
@@ -219,11 +219,21 @@ async function ensureReleaseForPsnTitle(
     platform_key: "psn",
   });
 
-  // (2) Find release by (platform_key='psn', game_id)
+  const pk = "psn";
+  const releaseInsert: any = {
+    game_id: gameId,
+    display_title: titleName.trim(),
+    platform_key: pk,
+    platform_name: "PlayStation",
+    platform_label: platformLabel,
+    cover_url: null,
+  };
+
+  // (2) Find release by (platform_key, game_id) or upsert
   const { data: existingByGame, error: findErr } = await admin
     .from("releases")
     .select("id")
-    .eq("platform_key", "psn")
+    .eq("platform_key", pk)
     .eq("game_id", gameId)
     .maybeSingle();
 
@@ -233,87 +243,105 @@ async function ensureReleaseForPsnTitle(
 
   if (existingByGame?.id) {
     releaseId = String(existingByGame.id);
-  } else {
-    // (3) Insert release with 23505 race handling
-    const releaseInsert: any = {
-      game_id: gameId,
-      display_title: titleName.trim(),
-      platform_key: "psn",
-      platform_name: "PlayStation",
-      platform_label: platformLabel,
-      cover_url: null,
-    };
 
-    const { data: releaseRow, error: rErr } = await admin
-      .from("releases")
-      .insert(releaseInsert)
-      .select("id")
-      .single();
-
-    if (rErr) {
-      const code = (rErr as { code?: string })?.code;
-      if (code === "23505") {
-        // Unique violation on (platform_key, game_id): another insert won the race. Re-query for the row (it may not be visible immediately).
-        async function findExistingRelease(): Promise<{ id: string } | null> {
-          const { data, error } = await admin
-            .from("releases")
-            .select("id")
-            .eq("platform_key", "psn")
-            .eq("game_id", gameId)
-            .maybeSingle();
-          if (error) throw new Error(`release race lookup: ${error.message}`);
-          return data?.id ? { id: String(data.id) } : null;
-        }
-        let raced = await findExistingRelease();
-        if (!raced) {
-          await new Promise((r) => setTimeout(r, 150));
-          raced = await findExistingRelease();
-        }
-        if (!raced) {
-          // One full retry from step (0): mapping or row may be visible now
-          if (!retried23505) return ensureReleaseForPsnTitle(opts, true);
-          throw new Error(`release race lookup failed: no row for (psn, ${gameId}) after 23505`);
-        }
-        releaseId = raced.id;
-      } else {
-        throw new Error(`Failed to insert release: ${rErr.message}`);
-      }
-    } else if (releaseRow?.id) {
-      releaseId = String(releaseRow.id);
-    } else {
-      throw new Error("Failed to insert release: no id returned");
-    }
-  }
-
-  // (4) Upsert release_external_ids; do not overwrite existing mapping (ignoreDuplicates)
-  const { error: mapUpErr } = await admin
-    .from("release_external_ids")
-    .upsert(releaseExternalIdRow(releaseId, "psn", psnExternalId), {
-      onConflict: "source,external_id",
-      ignoreDuplicates: true,
+    // Anchor mapping (atomic)
+    const { data: anchoredId, error: rpcErr } = await admin.rpc("ensure_release_external_id", {
+      p_source: "psn",
+      p_external_id: psnExternalId,
+      p_release_id: releaseId,
     });
 
-  if (mapUpErr) {
-    console.error(`Warning: Failed to upsert release_external_ids: ${mapUpErr.message}`);
-  }
+    if (rpcErr) throw new Error(`ensure_release_external_id failed: ${rpcErr.message}`);
+    if (anchoredId == null) throw new Error("ensure_release_external_id returned no release_id");
+    const anchored = String(anchoredId);
 
-  // If mapping already existed with a different release_id, merge our release into the anchored one
-  const { data: currentMap, error: selErr } = await admin
-    .from("release_external_ids")
-    .select("release_id")
-    .eq("source", "psn")
-    .eq("external_id", psnExternalId)
-    .maybeSingle();
-
-  if (!selErr && currentMap?.release_id) {
-    const anchoredId = String(currentMap.release_id);
-    if (anchoredId !== releaseId) {
-      await mergeReleaseInto(admin, anchoredId, releaseId);
-      return anchoredId;
+    if (anchored !== releaseId) {
+      await mergeReleaseInto(admin, anchored, releaseId);
+      return anchored;
     }
+    return releaseId;
   }
 
-  return releaseId;
+  // (3) Insert release with 23505 recovery by UNIQUE KEY used by DB
+  const { data: releaseRow, error: rErr } = await admin
+    .from("releases")
+    .insert(releaseInsert)
+    .select("id")
+    .single();
+
+  let insertedReleaseId: string;
+
+  if (rErr) {
+    const code = (rErr as { code?: string })?.code;
+    const msg = (rErr as { message?: string })?.message ?? "";
+    const isReleasesUnique = code === "23505";
+
+    if (isReleasesUnique) {
+      const pk = String(releaseInsert.platform_key ?? "psn");
+      const title = releaseInsert.display_title ?? releaseInsert.title ?? null;
+      const label = releaseInsert.platform_label ?? (releaseInsert as any).title_label ?? releaseInsert.label ?? null;
+
+      // releases_platform_game_unique: (platform_key, game_id)
+      const isPlatformGame = msg.includes("releases_platform_game_unique");
+      // releases_platform_title_label_unique: (platform_key, display_title, platform_label)
+      const isPlatformTitleLabel = msg.includes("releases_platform_title_label_unique");
+
+      let existing: { id?: string } | null = null;
+      let exErr: Error | null = null;
+
+      if (isPlatformGame) {
+        const res = await admin
+          .from("releases")
+          .select("id")
+          .eq("platform_key", pk)
+          .eq("game_id", releaseInsert.game_id)
+          .maybeSingle();
+        existing = res.data;
+        exErr = res.error;
+      } else if (isPlatformTitleLabel) {
+        let q = admin.from("releases").select("id").eq("platform_key", pk);
+        if (title != null) q = q.eq("display_title", title);
+        if (label != null) q = q.eq("platform_label", label);
+        const res = await q.maybeSingle();
+        existing = res.data;
+        exErr = res.error;
+        // Fallback if column is title_label instead of platform_label (42703 = undefined_column)
+        if ((exErr as { code?: string })?.code === "42703" && label != null) {
+          let q2 = admin.from("releases").select("id").eq("platform_key", pk);
+          if (title != null) q2 = q2.eq("display_title", title);
+          q2 = q2.eq("title_label", label);
+          const res2 = await q2.maybeSingle();
+          existing = res2.data;
+          exErr = res2.error;
+        }
+      }
+
+      if (exErr) throw new Error(`release unique lookup failed: ${exErr.message}`);
+      if (!existing?.id) throw new Error(`release unique lookup failed: no row for (${pk}, ${title}, ${label}) after 23505`);
+      insertedReleaseId = String(existing.id);
+    } else {
+      throw new Error(`Failed to insert release: ${rErr.message}`);
+    }
+  } else {
+    insertedReleaseId = String(releaseRow.id);
+  }
+
+  // (4) Anchor mapping (atomic)
+  const { data: anchoredId, error: rpcErr } = await admin.rpc("ensure_release_external_id", {
+    p_source: "psn",
+    p_external_id: psnExternalId,
+    p_release_id: insertedReleaseId,
+  });
+
+  if (rpcErr) throw new Error(`ensure_release_external_id failed: ${rpcErr.message}`);
+  const canonicalReleaseId = String(anchoredId);
+
+  // If someone else won the mapping race, merge our release into the canonical
+  if (canonicalReleaseId !== insertedReleaseId) {
+    await mergeReleaseInto(admin, canonicalReleaseId, insertedReleaseId);
+  }
+
+  return canonicalReleaseId;
 }
 
 /**
@@ -341,6 +369,8 @@ async function ensurePortfolioEntry(supabaseUser: any, userId: string, releaseId
 }
 
 export async function POST() {
+  let runId: string | null = null;
+  const start = Date.now();
   try {
     const supabaseUser = await supabaseRouteClient();
     const { data: userRes, error: userErr } = await supabaseUser.auth.getUser();
@@ -349,6 +379,17 @@ export async function POST() {
       return NextResponse.json({ error: "Not logged in" }, { status: 401 });
     }
     const user = userRes.user;
+    runId = await recordSyncStart(supabaseServer, user.id, "psn");
+    const endRun = async (
+      status: "ok" | "error",
+      opts?: { errorMessage?: string; resultJson?: unknown }
+    ) => {
+      await recordSyncEnd(supabaseServer, runId, status, {
+        durationMs: Date.now() - start,
+        errorMessage: opts?.errorMessage ?? undefined,
+        resultJson: opts?.resultJson ?? undefined,
+      });
+    };
 
     const supabaseAdmin = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -362,17 +403,24 @@ export async function POST() {
       .eq("user_id", user.id)
       .maybeSingle();
 
-    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
+    if (pErr) {
+      await endRun("error", { errorMessage: pErr.message, resultJson: { error: pErr.message, detail: pErr.message } });
+      return NextResponse.json({ error: pErr.message }, { status: 500 });
+    }
 
     const npsso = String(profile?.psn_npsso ?? "").trim();
     if (!npsso) {
-      return NextResponse.json({ error: "PSN not connected (missing NPSSO)" }, { status: 400 });
+      const errMsg = "PSN not connected (missing NPSSO)";
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail: errMsg } });
+      return NextResponse.json({ error: errMsg }, { status: 400 });
     }
 
     // 2) Get PSN access token
     const accessToken = await getPsnAccessTokenFromNpsso(npsso);
     if (!accessToken) {
-      return NextResponse.json({ error: "Failed to get PSN access token" }, { status: 500 });
+      const errMsg = "Failed to get PSN access token";
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail: errMsg } });
+      return NextResponse.json({ error: errMsg }, { status: 500 });
     }
 
     // 3) Resolve account id
@@ -382,7 +430,9 @@ export async function POST() {
     if (!accountId) {
       accountId = await getPsnAccountId(accessToken, onlineId);
       if (!accountId) {
-        return NextResponse.json({ error: "Failed to resolve PSN account id" }, { status: 500 });
+        const errMsg = "Failed to resolve PSN account id";
+        await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail: errMsg } });
+        return NextResponse.json({ error: errMsg }, { status: 500 });
       }
 
       await supabaseUser
@@ -608,7 +658,7 @@ export async function POST() {
       // Non-fatal: sync succeeded; archetype snapshot will refresh on next GET or recompute
     }
 
-    return NextResponse.json({
+    const payload = {
       ok: true,
       played: { imported: playedImported, updated: playedUpdated, total: playedRows.length },
       trophies: { imported: trophyImported, updated: trophyUpdated, total: trophyRows.length },
@@ -616,8 +666,16 @@ export async function POST() {
       total: lastCount,
       releases_touched: releasesTouched,
       note: "This sync now also maps PSN titles into releases + release_external_ids, ensures portfolio_entries exists, and imports trophy group chips.",
-    });
+    };
+    await endRun("ok", { resultJson: payload });
+    return NextResponse.json(payload);
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "PSN sync failed" }, { status: 500 });
+    const errMsg = e?.message ?? "PSN sync failed";
+    await recordSyncEnd(supabaseServer, runId, "error", {
+      durationMs: Date.now() - start,
+      errorMessage: errMsg,
+      resultJson: { error: errMsg, detail: e?.stack ?? errMsg },
+    });
+    return NextResponse.json({ error: errMsg }, { status: 500 });
   }
 }

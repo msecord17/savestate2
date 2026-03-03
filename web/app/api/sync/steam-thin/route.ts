@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { supabaseServer } from "@/lib/supabase/server";
+import { recordSyncEnd, recordSyncStart } from "@/lib/sync/record-run";
 import { ensureGameTitleOnly } from "@/lib/igdb/server";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
@@ -27,6 +29,8 @@ function nowIso() {
 }
 
 export async function POST() {
+  let runId: string | null = null;
+  const start = Date.now();
   try {
     const supabaseUser = await supabaseRouteClient();
     const { data: userRes, error: userErr } = await supabaseUser.auth.getUser();
@@ -34,6 +38,17 @@ export async function POST() {
       return NextResponse.json({ error: "Not logged in" }, { status: 401 });
     }
     const user = userRes.user;
+    runId = await recordSyncStart(supabaseServer, user.id, "steam");
+    const endRun = async (
+      status: "ok" | "error",
+      opts?: { errorMessage?: string; resultJson?: unknown }
+    ) => {
+      await recordSyncEnd(supabaseServer, runId, status, {
+        durationMs: Date.now() - start,
+        errorMessage: opts?.errorMessage ?? undefined,
+        resultJson: opts?.resultJson ?? undefined,
+      });
+    };
 
     const { data: profile, error: pErr } = await supabaseUser
       .from("profiles")
@@ -41,14 +56,19 @@ export async function POST() {
       .eq("user_id", user.id)
       .maybeSingle();
 
-    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
+    if (pErr) {
+      await endRun("error", { errorMessage: pErr.message, resultJson: { error: pErr.message, detail: pErr.message } });
+      return NextResponse.json({ error: pErr.message }, { status: 500 });
+    }
     const steamid = String(profile?.steam_id ?? "").trim();
     if (!steamid) {
+      await endRun("error", { errorMessage: "Steam not connected", resultJson: { error: "Steam not connected", detail: "Steam not connected" } });
       return NextResponse.json({ error: "Steam not connected" }, { status: 400 });
     }
 
     const key = process.env.STEAM_WEB_API_KEY;
     if (!key) {
+      await endRun("error", { errorMessage: "Missing STEAM_WEB_API_KEY in env", resultJson: { error: "Missing STEAM_WEB_API_KEY in env", detail: "Missing STEAM_WEB_API_KEY in env" } });
       return NextResponse.json(
         { error: "Missing STEAM_WEB_API_KEY in env" },
         { status: 500 }
@@ -67,14 +87,16 @@ export async function POST() {
       Array.isArray(steamJson?.response?.games) ? steamJson.response.games : [];
 
     if (!steamRes.ok) {
+      const errMsg = `Steam API failed (${steamRes.status})`;
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail: steamJson } });
       return NextResponse.json(
-        { error: `Steam API failed (${steamRes.status})`, detail: steamJson },
+        { error: errMsg, detail: steamJson },
         { status: 500 }
       );
     }
 
     if (games.length === 0) {
-      return NextResponse.json({
+      const payload = {
         ok: true,
         total: 0,
         mapped: 0,
@@ -83,7 +105,9 @@ export async function POST() {
         enrichment_state_upserted: 0,
         note:
           "No games returned. If Steam privacy is private, set Steam Privacy -> Game details to Public.",
-      });
+      };
+      await endRun("ok", { resultJson: payload });
+      return NextResponse.json(payload);
     }
 
     const supabaseAdmin = createClient(
@@ -298,8 +322,10 @@ export async function POST() {
       .eq("user_id", user.id);
 
     if (profUpdErr) {
+      const errMsg = `Profile sync stamp: ${profUpdErr.message}`;
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail: errMsg } });
       return NextResponse.json(
-        { error: `Profile sync stamp: ${profUpdErr.message}` },
+        { error: errMsg },
         { status: 500 }
       );
     }
@@ -310,7 +336,7 @@ export async function POST() {
       // Non-fatal: sync succeeded; archetype snapshot will refresh on next GET or recompute
     }
 
-    return NextResponse.json({
+    const payload = {
       ok: true,
       total: games.length,
       mapped,
@@ -318,8 +344,16 @@ export async function POST() {
       portfolio_upserted: portfolioUpserted,
       enrichment_state_upserted: enrichmentStateUpserted,
       errors: errors.length ? errors : undefined,
-    });
+    };
+    await endRun("ok", { resultJson: payload });
+    return NextResponse.json(payload);
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? "Sync failed" }, { status: 500 });
+    const errMsg = e?.message ?? "Sync failed";
+    await recordSyncEnd(supabaseServer, runId, "error", {
+      durationMs: Date.now() - start,
+      errorMessage: errMsg,
+      resultJson: { error: errMsg, detail: e?.stack ?? errMsg },
+    });
+    return NextResponse.json({ error: errMsg }, { status: 500 });
   }
 }

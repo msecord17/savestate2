@@ -26,17 +26,31 @@ export async function fetchIdentitySummary(): Promise<FetchIdentitySummaryResult
   const timeoutId = setTimeout(() => controller.abort(), IDENTITY_SUMMARY_TIMEOUT_MS);
   try {
     const base = getBase();
-    const res = await fetch(`${base}/api/identity/summary`, {
+    const res = await fetch(`${base}/api/users/me/identity`, {
       cache: "no-store",
       credentials: "include",
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
-    const data = await res.json().catch(() => null);
+    const raw = await res.json().catch(() => null);
     if (!res.ok) {
       return { data: null, errorStatus: res.status };
     }
-    return { data: (data ?? null) as IdentitySummaryApiResponse | null };
+    // API returns { identity, era_buckets, top_era, archetypes, played_on }; identity may be full object with .summary
+    let identity = (raw as any)?.identity ?? (raw as any)?.summary ?? raw;
+    if (identity?.summary) identity = identity.summary;
+    const eraBuckets = (raw as any)?.era_buckets ?? (identity as any)?.era_buckets ?? null;
+    const playedOn = (raw as any)?.played_on ?? null;
+    const merged: IdentitySummaryApiResponse | null =
+      identity && typeof identity === "object"
+        ? {
+            ...identity,
+            era_buckets: eraBuckets,
+            identity_signals: (identity as any).identity_signals ?? { era_buckets: eraBuckets },
+            played_on: playedOn,
+          }
+        : null;
+    return { data: merged };
   } catch (e) {
     clearTimeout(timeoutId);
     const isAbort = e instanceof Error && e.name === "AbortError";

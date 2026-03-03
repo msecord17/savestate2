@@ -134,13 +134,23 @@ export type GetIdentitySignalsJson = {
   unique_platforms?: number;
   owned_with_known_era?: number;
   era_span_years?: number;
+  /** Weighted top era (releases + minutes + achievements). Use this for UI. */
   primary_era_key?: string | null;
+  /** Same as primary_era_key; fallback for compatibility. */
+  top_era_weighted?: string | null;
+  /** Legacy debug field; same as primary_era_key. */
+  top_era?: string | null;
   primary_era_count?: number;
   primary_era_share?: number;
   achievements_earned?: number;
   achievements_total?: number;
   minutes_played?: number;
   era_buckets?: Record<string, { games?: number; releases?: number }>;
+  era_buckets_timeline?: Record<string, { games?: number; releases?: number }>;
+  era_entropy?: number;
+  era_entropy_timeline?: number;
+  top_era_timeline?: string | null;
+  primary_era_key_timeline?: string | null;
   top_platform?: string | null;
   top_platform_releases?: number;
   platform_counts?: Record<string, number>;
@@ -175,6 +185,16 @@ export function identitySignalsFromGetIdentitySignalsJson(json: GetIdentitySigna
 /** Map primary_era_key from get_identity_signals to strip ERA_THEME key. Normalizes legacy keys via toEraKey. */
 const ERA_KEY_TO_THEME: Record<string, string> = {
   gen1_1972_1977: "atari",
+  gen2_1978_1982: "nes",
+  gen3_1983_1989: "nes",
+  gen4_1990_1995: "snes",
+  gen5_1996_1999: "ps1",
+  gen6_2000_2005: "ps2",
+  gen7_2006_2012: "ps3_360",
+  gen8_2013_2019: "modern",
+  gen9_2020_plus: "modern",
+  unknown: "modern",
+  // Legacy
   gen2_1976_1984: "nes",
   gen3_1983_1992: "nes",
   gen4_1987_1996: "snes",
@@ -182,15 +202,14 @@ const ERA_KEY_TO_THEME: Record<string, string> = {
   gen5b_1996_2001: "ps1",
   gen6_1998_2005: "ps2",
   gen7_2005_2012: "ps3_360",
-  gen8_2013_2019: "modern",
-  gen9_2020_plus: "modern",
-  unknown: "modern",
 };
 
 export function eraKeyFromPrimaryEra(primary_era_key: string | null | undefined): string {
   const canonical = toEraKey(primary_era_key ?? "unknown");
   return ERA_KEY_TO_THEME[canonical] ?? "modern";
 }
+
+export { normalizeEraKey } from "@/lib/identity/normalize-era-key";
 
 /** Map computeArchetypes() result + era_key to IdentitySummaryApiResponse. */
 export function identitySummaryFromArchetypes(

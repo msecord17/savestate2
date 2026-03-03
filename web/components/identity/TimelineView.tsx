@@ -11,7 +11,11 @@ export type TimelineViewProps = {
   onModeChange: (mode: "release_year" | "played_on_gen") => void;
   sort: "dominance" | "chronological";
   onSortChange: (sort: "dominance" | "chronological") => void;
-  onSelectEra: (era: EraTimelineItem) => void;
+  onSelectEra: (era: EraTimelineItem, section?: "standouts" | "played_on" | "profile") => void;
+  playedOnByEra?: Record<
+    string,
+    { total_releases: number; handheld_share: number; top_device: { display_name: string } | null }
+  >;
 };
 
 /**
@@ -26,7 +30,9 @@ export function TimelineView({
   sort,
   onSortChange,
   onSelectEra,
+  playedOnByEra,
 }: TimelineViewProps) {
+  console.log("playedOnByEra keys:", Object.keys(playedOnByEra ?? {}).slice(0, 10));
   return (
     <div className="mx-auto max-w-lg px-4 py-6">
       <h1 className="text-xl font-bold text-slate-900 dark:text-white">
@@ -117,7 +123,9 @@ export function TimelineView({
             <li key={item.era}>
               <EraTimelineCard
                 era={item}
-                onSelect={() => onSelectEra(item)}
+                onSelect={(section) => onSelectEra(item, section)}
+                disabled={item.games === 0}
+                playedOnByEra={playedOnByEra}
               />
             </li>
           ))}

@@ -6,13 +6,14 @@
  */
 
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import {
   igdbSearchBest,
   igdbFetchGameById,
   normalizeCanonicalTitle,
 } from "@/lib/igdb/server";
 import { upsertGameExternalId, gameExternalIdRow } from "@/lib/game-external-ids";
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 const MATCHER_AUTO_APPROVED_THRESHOLD = 0.92;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 min
@@ -25,14 +26,10 @@ function passesSanityCheck(hit: { title?: string | null; first_release_year?: nu
   return true;
 }
 
-function adminClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
-}
-
 export async function POST(req: Request) {
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
   const admin = adminClient();
   const url = new URL(req.url);
   const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 200);

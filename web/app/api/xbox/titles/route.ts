@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { supabaseServer } from "@/lib/supabase/server";
 
 /** Stable label for release.platform_label and xbox_title_progress.title_platform (used for played-on generation). */
 export type XboxPlatformLabel = "Xbox 360" | "Xbox One" | "Xbox Series";
@@ -65,6 +66,7 @@ async function xblAuthenticate(accessToken: string) {
       "Content-Type": "application/json",
       "Accept-Language": "en-US",
       Accept: "application/json",
+      "x-xbl-contract-version": "1",
     },
     body: JSON.stringify({
       Properties: {
@@ -81,15 +83,54 @@ async function xblAuthenticate(accessToken: string) {
   const json = jsonOrNull(text);
 
   if (!res.ok) {
+    const error =
+      res.status === 401
+        ? "Xbox token expired — reconnect"
+        : `XBL user.authenticate failed (${res.status})`;
     return {
       ok: false as const,
       status: res.status,
-      error: `XBL user.authenticate failed (${res.status})`,
+      error,
       detail: json ?? text,
     };
   }
 
   return { ok: true as const, token: json?.Token as string };
+}
+
+async function refreshXboxAccessToken(origin: string, refreshToken: string) {
+  const clientId = process.env.XBOX_CLIENT_ID || "";
+  const clientSecret = process.env.XBOX_CLIENT_SECRET || "";
+  const redirectUri = process.env.XBOX_REDIRECT_URI || `${origin}/api/auth/xbox/callback`;
+
+  const tokenRes = await fetch("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      redirect_uri: redirectUri,
+      scope: "xboxlive.signin xboxlive.offline_access",
+    }).toString(),
+  });
+
+  const text = await tokenRes.text();
+  const json = jsonOrNull(text);
+
+  if (!tokenRes.ok) {
+    return { ok: false as const, error: `Xbox refresh failed (${tokenRes.status})`, detail: json ?? text };
+  }
+
+  const access_token = String(json?.access_token ?? "").trim();
+  const refresh_token = String(json?.refresh_token ?? "").trim(); // may rotate
+
+  if (!access_token) {
+    return { ok: false as const, error: "Xbox refresh returned no access_token", detail: json ?? text };
+  }
+
+  return { ok: true as const, access_token, refresh_token: refresh_token || null };
 }
 
 // 2) XSTS authorize
@@ -98,7 +139,7 @@ async function xstsAuthorize(xblToken: string) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Accept-Language": "en-US",
+      "x-xbl-contract-version": "1",
       Accept: "application/json",
     },
     body: JSON.stringify({
@@ -115,10 +156,14 @@ async function xstsAuthorize(xblToken: string) {
   const json = jsonOrNull(text);
 
   if (!res.ok) {
+    const error =
+      res.status === 401
+        ? "Xbox token expired — reconnect"
+        : `XSTS authorize failed (${res.status})`;
     return {
       ok: false as const,
       status: res.status,
-      error: `XSTS authorize failed (${res.status})`,
+      error,
       detail: json ?? text,
     };
   }
@@ -348,36 +393,67 @@ async function fetchAchievementHistoryTitles(authorization: string, xuid: string
   };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const origin = new URL(req.url).origin;
+
   // Must be logged in to your app
   const supabase = await supabaseRouteClient();
   const { data: userRes, error: userErr } = await supabase.auth.getUser();
 
   if (userErr || !userRes?.user) {
-    return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+    return NextResponse.json({ ok: false, error: "Not logged in" }, { status: 401 });
   }
   const user = userRes.user;
 
-  // Get stored xbox_access_token
+  // Get stored tokens
   const { data: profile, error: pErr } = await supabase
     .from("profiles")
-    .select("xbox_access_token")
+    .select("xbox_access_token, xbox_refresh_token")
     .eq("user_id", user.id)
     .maybeSingle();
 
   if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
 
-  const accessToken = String(profile?.xbox_access_token ?? "").trim();
+  let accessToken = String(profile?.xbox_access_token ?? "").trim();
+  const refreshToken = String(profile?.xbox_refresh_token ?? "").trim();
+
   if (!accessToken) {
-    return NextResponse.json({ error: "Xbox not connected (missing access token)" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "Xbox not connected" }, { status: 400 });
   }
 
-  // XBL + XSTS handshake
-  const xbl = await xblAuthenticate(accessToken);
-  if (!xbl.ok) return NextResponse.json({ error: xbl.error, detail: xbl.detail }, { status: 500 });
+  // Try handshake
+  let xbl = await xblAuthenticate(accessToken);
+
+  if (!xbl.ok && refreshToken) {
+    const refreshOrigin = process.env.NEXT_PUBLIC_SITE_URL ?? origin;
+    const refreshed = await refreshXboxAccessToken(refreshOrigin, refreshToken);
+
+    if (refreshed.ok) {
+      await supabaseServer
+        .from("profiles")
+        .update({
+          xbox_access_token: refreshed.access_token,
+          ...(refreshed.refresh_token ? { xbox_refresh_token: refreshed.refresh_token } : {}),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("user_id", user.id);
+
+      xbl = await xblAuthenticate(refreshed.access_token);
+    }
+  }
+
+  if (!xbl.ok)
+    return NextResponse.json(
+      { ok: false, error: xbl.error, detail: xbl.detail },
+      { status: xbl.status === 401 ? 401 : 500 }
+    );
 
   const xsts = await xstsAuthorize(xbl.token);
-  if (!xsts.ok) return NextResponse.json({ error: xsts.error, detail: xsts.detail }, { status: 500 });
+  if (!xsts.ok)
+    return NextResponse.json(
+      { ok: false, error: xsts.error, detail: xsts.detail },
+      { status: xsts.status === 401 ? 401 : 500 }
+    );
 
   if (!xsts.uhs || !xsts.token) {
     return NextResponse.json({ error: "XSTS missing uhs/token" }, { status: 500 });

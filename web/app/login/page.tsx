@@ -10,15 +10,21 @@ export default function LoginPage() {
 
   async function sendLink() {
     setMsg("");
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      },
-    });
+    try {
+      const base = process.env.NEXT_PUBLIC_SITE_URL ?? window.location.origin;
 
-    if (error) setMsg(error.message);
-    else setMsg("Check your email for the login link.");
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: `${base}/auth/callback?next=/my-portfolio`,
+        },
+      });
+
+      if (error) setMsg(error.message);
+      else setMsg("Check your email for the login link.");
+    } catch (e: any) {
+      setMsg(e?.message ?? "Failed to send login link");
+    }
   }
 
   return (

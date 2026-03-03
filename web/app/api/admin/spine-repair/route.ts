@@ -1,21 +1,22 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { upsertGameIgdbFirst } from "@/lib/igdb/server";
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 function nowIso() {
   return new Date().toISOString();
 }
 
 export async function POST(req: Request) {
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
   const url = new URL(req.url);
   const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 250);
   const dryRun = url.searchParams.get("dry_run") === "1";
   const cursor = url.searchParams.get("cursor"); // release_id cursor
 
-  const admin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  const admin = adminClient();
 
   // Pull "bad" releases, stable ordering for cursor pagination
   let q = admin

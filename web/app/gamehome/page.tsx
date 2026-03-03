@@ -6,14 +6,18 @@ import Link from "next/link";
 import ProgressBlock, { type ProgressSignal } from "@/components/progress/ProgressBlock";
 import { resolveCoverUrl } from "@/lib/images/resolveCoverUrl";
 import { IdentityStrip } from "@/app/components/identity/IdentityStrip";
+import { PlayedOnSummaryChip } from "@/components/identity/PlayedOnSummaryChip";
 import { EraTimeline } from "@/components/identity/EraTimeline";
+import { buildTimelineEras } from "@/lib/identity/timeline-view";
 import { eraLabel, eraYears, mergeEraBucketsByCanonical } from "@/lib/identity/eras";
+import { buildEraSnapshot } from "@/lib/identity/eraSnapshot";
 import { TopSignalsRow } from "@/app/components/identity/TopSignalsRow";
 import { EvolutionLine } from "@/app/components/identity/EvolutionLine";
 import { ArchetypeDrawer } from "@/app/components/identity/ArchetypeDrawer";
 import { EraDetailDrawer } from "@/app/components/identity/EraDetailDrawer";
 import type { IdentitySummaryApiResponse } from "@/lib/identity/types";
 import { originBucketFromYear } from "@/lib/identity/era";
+import { releaseHref } from "@/lib/routes";
 import { ARCHETYPE_THEME, ERA_THEME, STRENGTH_LABELS } from "@/lib/identity/strip-themes";
 import type { IdentitySignal } from "@/lib/identity/types";
 import {
@@ -36,6 +40,7 @@ import {
   Sprout,
   Archive,
   Clock,
+  Plug,
   type LucideIcon,
 } from "lucide-react";
 import { fetchGameHome, fetchIdentitySummary } from "@/src/core/api";
@@ -141,21 +146,37 @@ function timeAgo(iso: string | null) {
   return `${days}d ago`;
 }
 
-function pillStyle(bg: string) {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    padding: "4px 8px",
-    borderRadius: 999,
-    border: "1px solid #e5e7eb",
-    background: bg,
-    fontSize: 12,
-    fontWeight: 900 as const,
-    color: "#0f172a",
-    whiteSpace: "nowrap" as const,
-  };
+function HomeCard({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={[
+        "relative overflow-hidden",
+        "rounded-[var(--radius-xl)] border border-border",
+        "bg-card/60 backdrop-blur",
+        "shadow-[0_20px_80px_rgba(0,0,0,0.45)]",
+        "before:absolute before:inset-0 before:pointer-events-none before:content-['']",
+        "before:bg-[linear-gradient(to_bottom,rgba(255,255,255,0.06),transparent_40%)]",
+        className,
+      ].join(" ")}
+    >
+      {children}
+    </div>
+  );
 }
+
+function Kicker({ children }: { children: React.ReactNode }) {
+  return <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{children}</div>;
+}
+
+/** Gold primary CTA (Figma style) */
+const goldBtn =
+  "h-10 px-5 rounded-[var(--radius)] bg-[#F2C14E] text-black font-medium hover:bg-[#F2C14E]/90 active:scale-[0.99] transition";
 
 function normalizeSourceKey(s: string) {
   const x = String(s || "").toLowerCase();
@@ -218,7 +239,33 @@ function getPlatformPlaceholder(platformKey: string | null | undefined): string 
   return "/placeholders/platform/unknown.png";
 }
 
+type HomeSectionKey =
+  | "daily_spark"
+  | "recommended"
+  | "current_focus"
+  | "from_your_circle"
+  | "platform_affinity"
+  | "activity_snapshot";
+
+const HOME_SECTIONS_DEFAULT: Record<HomeSectionKey, boolean> = {
+  daily_spark: true,
+  recommended: true,
+  current_focus: true,
+  from_your_circle: true,
+  platform_affinity: true,
+  activity_snapshot: true,
+};
+
+function fmtInt(n: number) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(n);
+}
+function fmtCompact(n: number) {
+  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+}
+
 export default function GameHomePage() {
+  const [authChecked, setAuthChecked] = useState(false);
+  const [unauthorized, setUnauthorized] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [err, setErr] = useState("");
@@ -257,6 +304,34 @@ export default function GameHomePage() {
   /** Keys of cards just loaded (for fade-up animation on pagination). Cleared after ~500ms. */
   const [newCardKeys, setNewCardKeys] = useState<Set<string>>(new Set());
   const reducedMotion = useReducedMotion();
+
+  /** Connection status from /api/users/me/connections */
+  const [connections, setConnections] = useState<{
+    platforms: { key: string; label: string; connected: boolean; sync_status?: string | null; last_sync_run_at?: string | null }[];
+    last_synced_at: string | null;
+  } | null>(null);
+  const [syncing, setSyncing] = useState<Record<string, boolean>>({});
+
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [homeSections, setHomeSections] =
+    useState<Record<HomeSectionKey, boolean>>(HOME_SECTIONS_DEFAULT);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("gh_home_sections");
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        setHomeSections((prev) => ({ ...prev, ...parsed }));
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("gh_home_sections", JSON.stringify(homeSections));
+    } catch {}
+  }, [homeSections]);
 
   const identityChips = useMemo(() => {
     if (identityLoadDone && !identitySummary) {
@@ -345,6 +420,8 @@ export default function GameHomePage() {
 
   const evo = identitySummary?.evolution ?? null;
 
+  const LOAD_TIMEOUT_MS = 15_000;
+
   async function load(cursor?: string | null) {
     const isAppend = Boolean(cursor);
     if (isAppend) setLoadingMore(true);
@@ -352,7 +429,14 @@ export default function GameHomePage() {
     setErr("");
     try {
       const mode = splitByPlatform ? "release" : "game";
-      const { items, next_cursor, has_more } = await fetchGameHome(mode, cursor ?? null);
+      const fetchPromise = fetchGameHome(mode, cursor ?? null);
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Request timed out")), LOAD_TIMEOUT_MS)
+      );
+      const { items, next_cursor, has_more } = (await Promise.race([
+        fetchPromise,
+        timeoutPromise,
+      ])) as Awaited<ReturnType<typeof fetchGameHome>>;
       if (isAppend) {
         setCards((prev) => [...prev, ...(items as Card[])]);
         const keys = new Set(
@@ -379,10 +463,111 @@ export default function GameHomePage() {
   }
 
   useEffect(() => {
-    load();
-  }, [splitByPlatform]);
+    fetch("/api/users/me/identity", { cache: "no-store", credentials: "include" })
+      .then((r) => {
+        if (r.status === 401) {
+          setUnauthorized(true);
+          setLoading(false);
+        }
+        setAuthChecked(true);
+      })
+      .catch(() => setAuthChecked(true));
+  }, []);
+
+  async function loadConnections() {
+    try {
+      const res = await fetch("/api/users/me/connections", {
+        cache: "no-store",
+        credentials: "include",
+      });
+
+      if (res.status === 401) {
+        setUnauthorized(true);
+        return;
+      }
+
+      const j = await res.json().catch(() => ({}));
+      if (j?.ok === false) {
+        setErr(j?.error || "Failed to load connections");
+        return;
+      }
+
+      // Normalize whatever shape the API returns into what GameHome expects
+      const rawPlatforms = Array.isArray(j?.platforms) ? j.platforms : [];
+      const platforms = rawPlatforms.map((p: any) => ({
+        key: String(p.key),
+        label: String(p.label ?? p.key),
+        connected: !!p.connected,
+        sync_status: p.sync_status ?? p.status ?? null,
+        last_sync_run_at: p.last_sync_run_at ?? p.last_sync ?? null,
+      }));
+
+      const lastSynced =
+        j?.last_synced_at ??
+        platforms
+          .map((p: any) => p.last_sync_run_at)
+          .filter(Boolean)
+          .sort()
+          .slice(-1)[0] ??
+        null;
+
+      setConnections({ platforms, last_synced_at: lastSynced });
+    } catch (e: any) {
+      setErr(e?.message ?? "Failed to load connections");
+    }
+  }
 
   useEffect(() => {
+    if (!authChecked || unauthorized) return;
+    loadConnections();
+  }, [authChecked, unauthorized]);
+
+  const SYNC_ENDPOINTS: Record<string, string> = {
+    steam: "/api/sync/steam-thin",
+    ra: "/api/sync/retroachievements",
+  };
+
+  async function syncPlatform(key: string) {
+    const url = (SYNC_ENDPOINTS as any)[key];
+    if (!url) return;
+
+    setSyncing((s) => ({ ...s, [key]: true }));
+    setErr("");
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || res.statusText || "Sync failed");
+      }
+
+      // Refresh the "last synced" + per-platform status
+      await loadConnections();
+
+      // Refresh identity + library cards so the page reflects new data
+      setIdentityRetryKey((k) => k + 1);
+      await load(null);
+    } catch (e: any) {
+      setErr(e?.message ?? "Sync failed");
+      // Still refresh connections so "syncing" doesn't get stuck in UI
+      await loadConnections();
+    } finally {
+      setSyncing((s) => ({ ...s, [key]: false }));
+    }
+  }
+
+  useEffect(() => {
+    if (!authChecked || unauthorized) return;
+    load();
+  }, [authChecked, unauthorized, splitByPlatform]);
+
+  useEffect(() => {
+    if (!authChecked || unauthorized) return;
     setIdentityLoadDone(false);
     setIdentityErrorStatus(null);
     setIdentityTimedOut(false);
@@ -406,7 +591,7 @@ export default function GameHomePage() {
     return () => {
       cancelled = true;
     };
-  }, [identityRetryKey]);
+  }, [authChecked, unauthorized, identityRetryKey]);
 
   useEffect(() => {
     if (newCardKeys.size === 0) return;
@@ -529,73 +714,429 @@ export default function GameHomePage() {
       }));
   }, [eraFilter, filtered]);
 
-  return (
-    <div style={{ padding: 20, maxWidth: 1400, margin: "0 auto" }}>
-      <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>Game Home</h1>
-        <p style={{ color: "#64748b", marginBottom: 20 }}>
-          Your cross-platform game library at a glance.
-        </p>
+  const totalReleasesAll = (cards?.length ?? 0) || 1;
+  const eraProfile = eraFilter
+    ? {
+        owned_releases: filtered.length,
+        share_pct: filtered.length / totalReleasesAll,
+      }
+    : null;
 
-        {err ? (
-          <div
-            style={{
-              padding: 12,
-              background: "#fee",
-              border: "1px solid #fcc",
-              borderRadius: 8,
-              color: "#c00",
-            }}
-          >
-            {err}
-          </div>
-        ) : null}
+  const archetypeSnapshot =
+    eraFilter
+      ? buildEraSnapshot({
+          seed: identitySummary?.primary_archetype?.key ?? "gamehome",
+          eraKey: eraFilter,
+          eraLabel: eraLabel(eraFilter),
+          eraYears: eraYears(eraFilter),
+          archetypeName: identitySummary?.primary_archetype?.name ?? null,
+          ownedReleases: eraProfile?.owned_releases ?? null,
+          sharePct: eraProfile?.share_pct ?? null,
+          notableGames: eraDetailNotableGames,
+        })
+      : "";
 
-        <IdentityStrip chips={identityChips} onOpenDrawer={() => setDrawerOpen(true)} />
-        {identityLoadDone && !identitySummary ? (
-          <div style={{ marginTop: 8, marginLeft: 16 }}>
-            <button
-              type="button"
-              onClick={() => setIdentityRetryKey((k) => k + 1)}
-              style={{
-                padding: "6px 12px",
-                fontSize: 13,
-                fontWeight: 600,
-                border: "1px solid var(--color-border)",
-                borderRadius: 8,
-                background: "var(--color-surface)",
-                cursor: "pointer",
-                color: "var(--color-text)",
-              }}
-            >
-              Retry identity
-            </button>
-          </div>
-        ) : null}
-        <div className="px-4">
-          <EraTimeline
-            eraBuckets={mergeEraBucketsByCanonical(
-              identitySummary?.identity_signals?.era_buckets ??
-                identitySummary?.era_buckets ??
-                undefined
-            )}
-            selectedEra={eraFilter}
-            onSelectEra={toggleEra}
-          />
+  const eras = useMemo(() => {
+    return buildTimelineEras({
+      stats: mergeEraBucketsByCanonical(
+        identitySummary?.identity_signals?.era_buckets ??
+          identitySummary?.era_buckets ??
+          undefined
+      ),
+    });
+  }, [
+    identitySummary?.identity_signals?.era_buckets,
+    identitySummary?.era_buckets,
+  ]);
+
+  if (unauthorized) {
+    return (
+      <div className="min-h-screen bg-background text-foreground">
+        <div className="mx-auto max-w-[1240px] px-6 py-14">
+          <HomeCard className="max-w-md p-6">
+            <div className="text-lg font-semibold">GameHome</div>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Sign in to see your library and start building your gaming identity.
+            </p>
+            <div className="mt-5">
+              <Link href="/login?next=/gamehome" className={goldBtn}>
+                Continue to login
+              </Link>
+            </div>
+          </HomeCard>
         </div>
-        <TopSignalsRow
-          detail={topSignalsDetail}
-          onOpenDrawer={() => setDrawerOpen(true)}
-        />
-        {evo ? (
-          <div className="px-4">
-            <EvolutionLine
-              tag={evo.tag}
-              icon={evolutionIconFor(evo.icon)}
-              subtle
-            />
+      </div>
+    );
+  }
+
+  const connectedCount = connections?.platforms?.filter((p) => p.connected).length ?? 0;
+  const noPlatformsConnected = !!connections && connectedCount === 0;
+  const somePlatformsConnected = !!connections && connectedCount > 0;
+
+  // identity shortcuts (your API already returns identity.primary_archetype etc.)
+  const identity = (identitySummary as any)?.identity ?? identitySummary ?? null;
+  const arch = identity?.primary_archetype ?? identity?.archetype ?? null;
+  const archName = arch?.name ?? "Your Identity";
+  const archKey = String(arch?.key ?? "your_identity").toUpperCase();
+  const archOneLiner = arch?.one_liner ?? "Connect platforms to generate your identity.";
+
+  // score display (if lifetime_score is 0..1 today, this makes it look like "points")
+  const scoreRaw: number | null = typeof identity?.lifetime_score === "number" ? identity.lifetime_score : null;
+  const scorePoints = scoreRaw == null ? null : Math.max(0, Math.round(scoreRaw * 22000));
+  const scoreText = scorePoints == null ? "—" : fmtInt(scorePoints);
+
+  // quick stats
+  const totalMinutes =
+    cards.reduce((sum, c) => sum + (Number(c.steam_playtime_minutes ?? 0) || 0) + (Number(c.psn_playtime_minutes ?? 0) || 0), 0) || 0;
+  const hoursText = totalMinutes > 0 ? fmtCompact(totalMinutes / 60) : "0";
+
+  const doneCount = cards.filter((c) => String(c.status || "").toLowerCase() === "done").length;
+  const donePct = cards.length ? Math.round((doneCount / cards.length) * 100) : 0;
+
+  // recent activity rows
+  const recentActivity = [...cards]
+    .filter((c) => !!c.lastSignalAt)
+    .sort(byLastSignalDesc)
+    .slice(0, 5);
+
+  // platform affinity cards (simple + good-looking; wire "years/completion" later)
+  const platformAffinity = (() => {
+    const map: Record<string, number> = {};
+    for (const c of cards) {
+      const sources = Array.isArray(c.sources) ? c.sources : [];
+      for (const s of sources) {
+        const k = normalizeSourceKey(s);
+        map[k] = (map[k] || 0) + 1;
+      }
+    }
+    return Object.entries(map)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([k, n]) => ({
+        key: k,
+        label:
+          k === "steam" ? "PC" :
+          k === "psn" ? "PlayStation" :
+          k === "xbox" ? "Xbox" :
+          k === "ra" ? "RetroAchievements" :
+          k.toUpperCase(),
+        games: n,
+      }));
+  })();
+
+  // recommended: just pick something plausible from your lanes
+  const recommended = playingCards[0] ?? continueCards[0] ?? allCards[0] ?? null;
+
+  return (
+    <div className="relative min-h-screen bg-background text-foreground">
+      {/* ambient glow */}
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-48 left-1/2 h-[520px] w-[900px] -translate-x-1/2 rounded-full bg-[#F2C14E]/10 blur-3xl" />
+        <div className="absolute -top-24 left-1/4 h-[420px] w-[620px] rounded-full bg-indigo-500/10 blur-3xl" />
+      </div>
+
+      <div className="relative mx-auto max-w-[1240px] px-6 py-10 space-y-8">
+        {/* header row */}
+        <div className="flex items-center justify-between">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold">GameHome</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Your cross-platform game library at a glance.
+            </p>
           </div>
-        ) : null}
+
+          <button
+            type="button"
+            onClick={() => setCustomizeOpen(true)}
+            className="inline-flex items-center gap-2 rounded-[var(--radius)] border border-border bg-card/40 px-3 py-2 text-sm text-foreground/90 hover:bg-card/60 transition"
+          >
+            <Plug className="h-4 w-4 text-muted-foreground" />
+            Customize Home
+          </button>
+        </div>
+
+        {/* HERO */}
+        <HomeCard className="p-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+            <div>
+              <Kicker>{archKey}</Kicker>
+
+              <div className="mt-3 flex items-center gap-3">
+                <div className="h-12 w-12 rounded-[var(--radius)] bg-[#F2C14E]/15 border border-[#F2C14E]/20 flex items-center justify-center">
+                  <span className="text-[#F2C14E]">{iconFor(String(arch?.icon ?? "Archive"))}</span>
+                </div>
+                <div className="text-3xl font-semibold tracking-tight">{archName}</div>
+              </div>
+
+              <p className="mt-3 text-base text-foreground/85 max-w-xl">
+                {archOneLiner}
+              </p>
+
+              <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-6">
+                <div>
+                  <Kicker>Era dominance</Kicker>
+                  <div className="mt-1 text-sm text-foreground/90">
+                    {(identitySummary as any)?.top_era?.label ?? identity?.era_affinity?.name ?? "—"}
+                  </div>
+                </div>
+                <div>
+                  <Kicker>Completion rate</Kicker>
+                  <div className="mt-1 text-sm text-foreground/90">{donePct ? `${donePct}%` : "—"}</div>
+                </div>
+                <div>
+                  <Kicker>Replay style</Kicker>
+                  <div className="mt-1 text-sm text-foreground/90">
+                    {identity?.era_affinity?.one_liner ? "Era-driven" : "—"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="md:pl-10 md:border-l md:border-border/60">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground uppercase tracking-wider">
+              <Trophy className="h-4 w-4" />
+              Lifetime score
+            </div>
+
+              <div className="mt-2 text-4xl font-semibold tracking-tight text-[#F2C14E]">
+                {scoreText}
+              </div>
+
+            <div className="mt-2 text-sm text-muted-foreground">
+              {somePlatformsConnected && connections?.last_synced_at
+                ? `Last synced ${timeAgo(connections.last_synced_at) ?? "—"}`
+                : "Connect platforms to deepen your story."}
+            </div>
+
+              <div className="mt-6 grid grid-cols-3 gap-6">
+                <div>
+                  <Kicker>Games</Kicker>
+                  <div className="mt-1 text-lg font-semibold">{fmtInt(cards.length)}</div>
+                </div>
+                <div>
+                  <Kicker>Hours</Kicker>
+                  <div className="mt-1 text-lg font-semibold">{hoursText}</div>
+                </div>
+                <div>
+                  <Kicker>Done</Kicker>
+                  <div className="mt-1 text-lg font-semibold">{donePct ? `${donePct}%` : "—"}</div>
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <Link href="/timeline" className="text-sm text-[#F2C14E] hover:underline">
+                  See breakdown
+                </Link>
+              </div>
+            </div>
+          </div>
+        </HomeCard>
+
+        {/* PRE-CONNECT CTA */}
+        {noPlatformsConnected && (
+          <HomeCard className="p-7">
+            <div className="text-lg font-semibold">Deepen your Gamer Life Score</div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Connect your platforms to unlock more of your story.
+            </p>
+
+            <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-3">
+              {["Steam", "PlayStation", "Xbox", "Discord"].map((label) => (
+                <Link
+                  key={label}
+                  href="/connect"
+                  className="rounded-[var(--radius-lg)] border border-border bg-card/40 px-4 py-5 text-center hover:bg-card/60 transition"
+                >
+                  <div className="text-sm font-semibold">{label}</div>
+                </Link>
+              ))}
+            </div>
+          </HomeCard>
+        )}
+
+        {/* POST-CONNECT MODULES */}
+        {somePlatformsConnected && (
+          <>
+            {/* Daily Spark */}
+            {homeSections.daily_spark && (
+              <HomeCard className="p-7 flex items-center justify-between gap-6">
+                <div className="flex items-center gap-4">
+                  <div className="h-12 w-12 rounded-[var(--radius-lg)] bg-[#F2C14E]/10 border border-[#F2C14E]/15 flex items-center justify-center">
+                    <Sparkles className="h-5 w-5 text-[#F2C14E]" />
+                  </div>
+                  <div>
+                    <Kicker>Daily spark</Kicker>
+                    <div className="mt-1 text-lg font-semibold">
+                      This 1997 RPG changed turn-based combat forever.
+                    </div>
+                    <div className="mt-1 text-sm text-muted-foreground">
+                      Hint: you&apos;ve played 3 from this series.
+                    </div>
+                  </div>
+                </div>
+
+                <button type="button" className="rounded-[var(--radius)] border border-border bg-card/50 px-5 py-2 text-sm hover:bg-card/70 transition">
+                  Reveal
+                </button>
+              </HomeCard>
+            )}
+
+            {/* Recommended */}
+            {homeSections.recommended && (
+              <HomeCard className="p-7">
+                <Kicker>Recommended for you</Kicker>
+                <div className="mt-2 flex flex-col md:flex-row md:items-center gap-6">
+                  <div className="h-20 w-16 rounded-[var(--radius-lg)] overflow-hidden border border-border bg-card/60 shrink-0">
+                  <img
+                    src={
+                      resolveCoverUrl({ cover_url: recommended?.cover_url ?? null, game_cover_url: recommended?.cover_url ?? null }) ||
+                      getPlatformPlaceholder(recommended?.platform_key ?? null)
+                    }
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-2xl font-semibold">{recommended?.title ?? "Persona 4 Golden"}</div>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      You return to PS2-era RPGs more than any other genre. This is one you haven&apos;t logged yet.
+                    </p>
+                    <ul className="mt-3 text-sm text-muted-foreground list-disc pl-5 space-y-1">
+                      <li>Era overlap</li>
+                      <li>Genre affinity</li>
+                      <li>Completion-style match</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <button type="button" className={`w-full ${goldBtn}`}>
+                    Add to Backlog
+                  </button>
+                </div>
+
+                <div className="mt-4 text-center">
+                  <button type="button" className="text-sm text-[#F2C14E] hover:underline">
+                    Why this pick?
+                  </button>
+                </div>
+              </HomeCard>
+            )}
+
+            {/* Your Platforms */}
+            {homeSections.platform_affinity && (
+              <div className="space-y-4">
+                <div className="text-xl font-semibold">Your Platforms</div>
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  {platformAffinity.map((p) => (
+                    <HomeCard key={p.key} className="p-5">
+                      <div className="flex items-center gap-3">
+                        <div className="h-9 w-9 rounded-[var(--radius)] bg-card/60 border border-border flex items-center justify-center">
+                          <Monitor className="h-4 w-4 text-muted-foreground" />
+                        </div>
+                        <div className="text-sm font-semibold">{p.label}</div>
+                      </div>
+
+                      <div className="mt-4 space-y-2 text-sm text-muted-foreground">
+                      <div className="flex items-center justify-between">
+                        <span>Years Active</span>
+                        <span className="text-foreground/90">—</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Games</span>
+                        <span className="text-foreground/90">{fmtInt(p.games)}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Completion</span>
+                        <span className="text-foreground/90">—</span>
+                      </div>
+                      </div>
+                    </HomeCard>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Activity */}
+            {homeSections.activity_snapshot && (
+              <div className="space-y-4">
+                <div className="text-xl font-semibold">Activity</div>
+
+                <HomeCard className="p-0">
+                  <div className="divide-y divide-border/60">
+                    {recentActivity.length === 0 ? (
+                      <div className="p-6 text-sm text-muted-foreground">
+                        No recent activity yet. Sync Steam / PSN / Xbox / RA to start building your timeline.
+                      </div>
+                    ) : (
+                      recentActivity.map((c) => (
+                        <div key={c.release_id ?? c.title} className="p-5 flex items-center justify-between gap-4">
+                          <div className="min-w-0 flex items-center gap-4">
+                            <div className="h-10 w-10 rounded-full bg-[#F2C14E]/10 border border-border flex items-center justify-center">
+                              <span className="h-2 w-2 rounded-full bg-[#F2C14E]" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-medium truncate">{c.title}</div>
+                              <div className="text-sm text-muted-foreground truncate">
+                                Updated from {Array.isArray(c.sources) ? c.sources.join(", ") : "signals"}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="text-sm text-muted-foreground shrink-0">
+                            {timeAgo(c.lastSignalAt)}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </HomeCard>
+
+                <Link href="/timeline" className="text-sm text-muted-foreground hover:underline">
+                  View full activity →
+                </Link>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Recall hook */}
+        <HomeCard className="p-5">
+          <Link href="/platforms/n64" className="text-sm text-[#F2C14E] hover:underline">
+            Recall your N64 era →
+          </Link>
+        </HomeCard>
+
+        {/* (Optional) keep your existing "identity strip + library UI" below, but put it in a card so it doesn't ruin the vibe */}
+        <HomeCard className="p-6">
+          {err && (
+            <div className="mb-4 rounded-[var(--radius)] border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+              {err}
+            </div>
+          )}
+
+          <IdentityStrip chips={identityChips} onOpenDrawer={() => setDrawerOpen(true)} />
+
+          {/* keep your old TODO blocks / filters / grid below as you wire them; at least they're visually contained */}
+          <div className="mt-4 text-sm text-muted-foreground">
+            Explore + filters + grid live here (keep wiring). When you&apos;re ready, we can move the grid to a dedicated /explore page.
+          </div>
+
+          {hasMore && (
+            <div className="mt-5">
+              <button
+                type="button"
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="rounded-[var(--radius)] border border-border bg-card/50 px-4 py-2 text-sm hover:bg-card/70 disabled:opacity-50"
+              >
+                {loadingMore ? "Loading…" : "Show more"}
+              </button>
+            </div>
+          )}
+        </HomeCard>
 
         <ArchetypeDrawer
           open={drawerOpen}
@@ -614,595 +1155,67 @@ export default function GameHomePage() {
           interpretation="This era holds a strong place in your library. You collect across platforms and editions."
           signalChips={["Library depth", "Era focus", "Multi-platform"]}
           notableGames={eraDetailNotableGames}
-          archetypeSnapshot={
-            identitySummary?.primary_archetype
-              ? `Your collection in this era reflects your ${identitySummary.primary_archetype.name} tendencies.`
-              : "Your profile in this era will appear as you connect platforms and add games."
-          }
+          eraProfile={eraProfile}
+          archetypeSnapshot={archetypeSnapshot}
           primaryArchetypeKey={identitySummary?.primary_archetype?.key}
         />
 
-        {loading ? (
-          <div style={{ padding: 20, textAlign: "center", color: "#64748b" }}>Loading...</div>
-        ) : (
-          <>
+        {/* Customize modal */}
+        {customizeOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
             <div
-              style={{
-                display: "flex",
-                gap: 10,
-                flexWrap: "wrap",
-                alignItems: "center",
-                marginBottom: 20,
-              }}
-            >
-              <label style={{ fontWeight: 900, color: "#0f172a" }}>
-                Platform:
-                <select
-                  value={platform}
-                  onChange={(e) => setPlatform(e.target.value)}
-                  style={{ marginLeft: 8, padding: "4px 8px", borderRadius: 6 }}
-                >
-                  {platforms.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label style={{ fontWeight: 900, color: "#0f172a" }}>
-                Source:
-                <select
-                  value={source}
-                  onChange={(e) => setSource(e.target.value)}
-                  style={{ marginLeft: 8, padding: "4px 8px", borderRadius: 6 }}
-                >
-                  <option value="all">all</option>
-                  <option value="Steam">Steam</option>
-                  <option value="PSN">PSN</option>
-                  <option value="Xbox">Xbox</option>
-                </select>
-              </label>
-
-              <label style={{ fontWeight: 900, color: "#0f172a" }}>
-                Status:
-                <select
-                  value={status}
-                  onChange={(e) => setStatus(e.target.value)}
-                  style={{ marginLeft: 8, padding: "4px 8px", borderRadius: 6 }}
-                >
-                  {statuses.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label style={{ fontWeight: 900, color: "#0f172a" }}>
-                Sort:
-                <select
-                  value={sort}
-                  onChange={(e) => setSort(e.target.value as any)}
-                  style={{ marginLeft: 8, padding: "4px 8px", borderRadius: 6 }}
-                >
-                  <option value="recent">Recent</option>
-                  <option value="title">Title</option>
-                </select>
-              </label>
-
-              <label
-                style={{
-                  display: "inline-flex",
-                  gap: 8,
-                  alignItems: "center",
-                  fontWeight: 900,
-                  color: "#0f172a",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={updatedRecently}
-                  onChange={(e) => setUpdatedRecently(e.target.checked)}
-                />
-                Recently updated (3d)
-              </label>
-
-              <label
-                style={{
-                  display: "inline-flex",
-                  gap: 8,
-                  alignItems: "center",
-                  fontWeight: 900,
-                  color: "#0f172a",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={splitByPlatform}
-                  onChange={(e) => setSplitByPlatform(e.target.checked)}
-                />
-                Split by platform
-              </label>
-
-              <div style={{ color: "#64748b", fontSize: 13 }}>
-                Showing <b>{filtered.length}</b> / {cards.length}
-              </div>
-            </div>
-
-            {/* Lanes (only show in game mode) */}
-            {!splitByPlatform && continueCards.length > 0 && (
-              <section style={{ marginBottom: 32 }}>
-                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Continue</h2>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-                    gap: 16,
-                  }}
-                >
-                  {continueCards.map((card: any) => {
-                    const bestRel = bestRelease(card.releases ?? []);
-                    const releaseId = bestRel?.release_id ?? null;
-                    const platformKey = card?.platforms?.[0] ?? null;
-                    const cover = resolveCoverUrl({
-                      cover_url: card.cover_url,
-                      platform_key: platformKey,
-                    });
-                    const fallback = getPlatformPlaceholder(platformKey);
-                    if (!releaseId) return null;
-                    return (
-                      <Link key={releaseId} href={`/releases/${releaseId}`} style={{ display: "block" }}>
-                        <div
-                          style={{
-                            borderRadius: 12,
-                            overflow: "hidden",
-                            background: "rgba(24, 24, 27, 0.4)",
-                            border: "1px solid rgba(39, 39, 42, 1)",
-                          }}
-                        >
-                          <img
-                            src={cover}
-                            alt={card.title}
-                            style={{
-                              width: "100%",
-                              aspectRatio: "16/9",
-                              objectFit: "cover",
-                            }}
-                            onError={(e) => {
-                              const img = e.currentTarget;
-                              if (img.src.endsWith(fallback)) return; // prevent infinite loop
-                              img.src = fallback;
-                            }}
-                          />
-                          <div style={{ padding: 12 }}>
-                            <div
-                              style={{
-                                fontSize: 14,
-                                fontWeight: 500,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {card.title}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: 12,
-                                color: "#a1a1aa",
-                                marginTop: 4,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {card.platforms?.join(" • ")}
-                            </div>
-                          </div>
-                        </div>
-                      </Link>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
-
-            {!splitByPlatform && playingCards.length > 0 && (
-              <section style={{ marginBottom: 32 }}>
-                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Now Playing</h2>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-                    gap: 16,
-                  }}
-                >
-                  {playingCards.map((card: any) => {
-                    const bestRel = bestRelease(card.releases ?? []);
-                    const releaseId = bestRel?.release_id ?? null;
-                    const platformKey = card?.platforms?.[0] ?? null;
-                    const cover = resolveCoverUrl({
-                      cover_url: card.cover_url,
-                      platform_key: platformKey,
-                    });
-                    const fallback = getPlatformPlaceholder(platformKey);
-                    if (!releaseId) return null;
-                    return (
-                      <Link key={releaseId} href={`/releases/${releaseId}`} style={{ display: "block" }}>
-                        <div
-                          style={{
-                            borderRadius: 12,
-                            overflow: "hidden",
-                            background: "rgba(24, 24, 27, 0.4)",
-                            border: "1px solid rgba(39, 39, 42, 1)",
-                          }}
-                        >
-                          <img
-                            src={cover}
-                            alt={card.title}
-                            style={{
-                              width: "100%",
-                              aspectRatio: "16/9",
-                              objectFit: "cover",
-                            }}
-                            onError={(e) => {
-                              const img = e.currentTarget;
-                              if (img.src.endsWith(fallback)) return; // prevent infinite loop
-                              img.src = fallback;
-                            }}
-                          />
-                          <div style={{ padding: 12 }}>
-                            <div
-                              style={{
-                                fontSize: 14,
-                                fontWeight: 500,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {card.title}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: 12,
-                                color: "#a1a1aa",
-                                marginTop: 4,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {card.platforms?.join(" • ")}
-                            </div>
-                          </div>
-                        </div>
-                      </Link>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
-
-            {!splitByPlatform && (
-              <section style={{ marginBottom: 32 }}>
-                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>All Games</h2>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-                    gap: 16,
-                  }}
-                >
-                  {allCards.map((card: any) => {
-                    const bestRel = bestRelease(card.releases ?? []);
-                    const releaseId = bestRel?.release_id ?? null;
-                    const platformKey = card?.platforms?.[0] ?? null;
-                    const cover = resolveCoverUrl({
-                      cover_url: card.cover_url,
-                      platform_key: platformKey,
-                    });
-                    const fallback = getPlatformPlaceholder(platformKey);
-                    if (!releaseId) return null;
-                    return (
-                      <Link key={releaseId} href={`/releases/${releaseId}`} style={{ display: "block" }}>
-                        <div
-                          style={{
-                            borderRadius: 12,
-                            overflow: "hidden",
-                            background: "rgba(24, 24, 27, 0.4)",
-                            border: "1px solid rgba(39, 39, 42, 1)",
-                          }}
-                        >
-                          <img
-                            src={cover}
-                            alt={card.title}
-                            style={{
-                              width: "100%",
-                              aspectRatio: "16/9",
-                              objectFit: "cover",
-                            }}
-                            onError={(e) => {
-                              const img = e.currentTarget;
-                              if (img.src.endsWith(fallback)) return; // prevent infinite loop
-                              img.src = fallback;
-                            }}
-                          />
-                          <div style={{ padding: 12 }}>
-                            <div
-                              style={{
-                                fontSize: 14,
-                                fontWeight: 500,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {card.title}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: 12,
-                                color: "#a1a1aa",
-                                marginTop: 4,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {card.platforms?.join(" • ")}
-                            </div>
-                          </div>
-                        </div>
-                      </Link>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
-
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
-                gap: 14,
-              }}
-            >
-              {filtered.map((c, idx) => {
-                const updated = timeAgo(c.lastSignalAt);
-                const platformKey = splitByPlatform
-                  ? (c.platform_key ?? null)
-                  : (Array.isArray(c.platforms) ? c.platforms[0] : null) ?? null;
-                const cover = resolveCoverUrl({
-                  cover_url: c.cover_url,
-                  platform_key: platformKey,
-                });
-                const fallback = getPlatformPlaceholder(platformKey);
-
-                const hasSteam = Number(c.steam_playtime_minutes || 0) > 0;
-
-                const hasPsn =
-                  c.psn_playtime_minutes != null ||
-                  c.psn_trophy_progress != null ||
-                  (c as any).psn_last_updated_at != null;
-
-                const hasXbox =
-                  c.xbox_gamerscore_total != null ||
-                  c.xbox_achievements_total != null ||
-                  (c as any).xbox_last_updated_at != null;
-
-                const showPsnTrophies = c.psn_trophy_progress != null;
-                const showXboxGS = (c.xbox_gamerscore_total ?? 0) > 0;
-
-                // Ensure unique key in both modes (append idx so same game on multiple platforms after "Show more" doesn't duplicate key)
-                const baseKey = splitByPlatform
-                  ? (c.release_id ?? `${c.title}-${idx}`)
-                  : (c.game_id ?? c.release_id ?? `${c.title}-${idx}`);
-                const uniqueKey = `${baseKey}-${idx}`;
-                const isNewCard = newCardKeys.has(String(baseKey));
-
-                return (
-                  <motion.div
-                    key={uniqueKey}
-                    initial={
-                      isNewCard && !reducedMotion
-                        ? { opacity: 0, y: 6 }
-                        : false
-                    }
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.18 }}
-                    whileHover={
-                      reducedMotion ? undefined : { y: -2, transition: { duration: 0.12 } }
-                    }
-                    style={{
-                      border: "1px solid #e5e7eb",
-                      borderRadius: 8,
-                      overflow: "hidden",
-                      background: "#fff",
-                    }}
-                  >
-                    {c.release_id ? (
-                      <Link
-                        href={`/releases/${c.release_id}`}
-                        style={{
-                          display: "block",
-                          height: 140,
-                          position: "relative",
-                          overflow: "hidden",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <img
-                          src={cover || fallback}
-                          alt={c.title}
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            objectFit: "cover",
-                          }}
-                          onError={(e) => {
-                            const img = e.currentTarget;
-                            if (img.src.endsWith(fallback)) return; // prevent infinite loop
-                            img.src = fallback;
-                          }}
-                        />
-                      </Link>
-                    ) : (
-                      <div
-                        style={{
-                          height: 140,
-                          position: "relative",
-                          overflow: "hidden",
-                        }}
-                      >
-                        <img
-                          src={cover || fallback}
-                          alt={c.title}
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            objectFit: "cover",
-                          }}
-                          onError={(e) => {
-                            const img = e.currentTarget;
-                            if (img.src.endsWith(fallback)) return; // prevent infinite loop
-                            img.src = fallback;
-                          }}
-                        />
-                      </div>
-                    )}
-
-                    <div style={{ padding: 12 }}>
-                      {/* Title */}
-                      <div style={{ fontWeight: 900, fontSize: 16, lineHeight: 1.25 }}>
-                        {c.title}
-                      </div>
-
-                      {/* Platform(s) */}
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: 6,
-                          flexWrap: "wrap",
-                          marginTop: 4,
-                          marginBottom: 10,
-                        }}
-                      >
-                        {(Array.isArray((c as any).platforms)
-                          ? (c as any).platforms
-                          : [c.platform_label || c.platform_name || c.platform_key]
-                        )
-                          .filter(Boolean)
-                          .map((p: string) => (
-                            <span
-                              key={p}
-                              style={{
-                                fontSize: 11,
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                                background: "#f1f5f9",
-                                border: "1px solid #e5e7eb",
-                                fontWeight: 700,
-                                color: "#0f172a",
-                              }}
-                            >
-                              {p}
-                            </span>
-                          ))}
-                      </div>
-
-                      {c.lastSignalAt && (
-                        <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>
-                          Last activity: <b>{timeAgo(c.lastSignalAt)}</b>
-                        </div>
-                      )}
-
-                      {/* indicator pills */}
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
-                        {/* Status (primary) */}
-                        <span
-                          style={{
-                            ...pillStyle(
-                              c.status === "completed"
-                                ? "#ecfeff"
-                                : c.status === "playing"
-                                ? "#eef2ff"
-                                : c.status === "wishlist"
-                                ? "#f8fafc"
-                                : "#fff7ed"
-                            ),
-                            fontWeight: 900,
-                          }}
-                        >
-                          {c.status || "owned"}
-                        </span>
-
-                        {/* Sync signals */}
-                        <div style={{ display: "flex", gap: 10, fontSize: 11, color: "#64748b" }}>
-                          {hasSteam && <span>Steam</span>}
-                          {hasPsn && <span>PSN</span>}
-                          {hasXbox && <span>Xbox</span>}
-                          {!hasSteam && !hasPsn && !hasXbox && (
-                            <span style={{ color: "#b45309" }}>No sync signal</span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* details block */}
-                      {(() => {
-                        const signals: ProgressSignal[] = [];
-
-                        if (hasSteam) {
-                          signals.push({
-                            source: "steam",
-                            label: "Steam",
-                            playtimeMinutes: c.steam_playtime_minutes,
-                            lastUpdatedAt: c.lastSignalAt ?? null,
-                          });
-                        }
-
-                        if (hasPsn) {
-                          signals.push({
-                            source: "psn",
-                            label: "PSN",
-                            progressPct: c.psn_trophy_progress ?? undefined,
-                            earned: c.psn_trophies_earned ?? undefined,
-                            total: c.psn_trophies_total ?? undefined,
-                          });
-                        }
-
-                        return <ProgressBlock signals={signals} />;
-                      })()}
-                    </div>
-                  </motion.div>
-                );
-              })}
-            </div>
-
-            {hasMore && (
-              <div style={{ marginTop: 24, textAlign: "center" }}>
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              onClick={() => setCustomizeOpen(false)}
+            />
+            <HomeCard className="relative w-full max-w-xl p-0">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+                <div className="text-lg font-semibold">Customize Your Home</div>
                 <button
                   type="button"
-                  onClick={loadMore}
-                  disabled={loadingMore}
-                  style={{
-                    minHeight: tokens.touchTargetMin,
-                    minWidth: tokens.touchTargetMin,
-                    padding: "10px 20px",
-                    borderRadius: 12,
-                    border: "1px solid var(--color-border)",
-                    background: "var(--color-surface)",
-                    fontWeight: 700,
-                    cursor: loadingMore ? "not-allowed" : "pointer",
-                    color: "var(--color-text)",
-                  }}
+                  onClick={() => setCustomizeOpen(false)}
+                  className="rounded-[var(--radius)] border border-border bg-card/40 px-3 py-1.5 text-sm hover:bg-card/60"
                 >
-                  {loadingMore ? "Loading…" : "Show more"}
+                  ✕
                 </button>
               </div>
-            )}
-          </>
+
+              <div className="p-6 space-y-3">
+                {(
+                  [
+                    ["daily_spark", "Daily Spark"],
+                    ["recommended", "Recommended"],
+                    ["current_focus", "Current Focus"],
+                    ["from_your_circle", "From Your Circle"],
+                    ["platform_affinity", "Platform Affinity"],
+                    ["activity_snapshot", "Activity Snapshot"],
+                  ] as Array<[HomeSectionKey, string]>
+                ).map(([key, label]) => (
+                  <div key={key} className="flex items-center justify-between rounded-[var(--radius-lg)] border border-border bg-card/40 px-4 py-3">
+                    <div className="text-sm font-medium">{label}</div>
+                    <input
+                      type="checkbox"
+                      checked={!!homeSections[key]}
+                      onChange={(e) => setHomeSections((s) => ({ ...s, [key]: e.target.checked }))}
+                      className="h-4 w-4 accent-[#F2C14E]"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center justify-between px-6 py-4 border-t border-border">
+                <button
+                  type="button"
+                  onClick={() => setHomeSections(HOME_SECTIONS_DEFAULT)}
+                  className="text-sm text-muted-foreground hover:underline"
+                >
+                  Reset to Default
+                </button>
+              <button type="button" onClick={() => setCustomizeOpen(false)} className={goldBtn}>
+                Save Changes
+              </button>
+              </div>
+            </HomeCard>
+          </div>
         )}
       </div>
     </div>

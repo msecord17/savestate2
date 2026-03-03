@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 /**
  * POST: set game_master_mappings.status = 'confirmed' for the given mapping id.
@@ -9,13 +10,13 @@ export async function POST(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
   const { id } = await params;
   if (!id?.trim()) return NextResponse.json({ error: "Missing mapping id" }, { status: 400 });
 
-  const admin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  const admin = adminClient();
 
   const now = new Date().toISOString();
   const { data, error } = await admin

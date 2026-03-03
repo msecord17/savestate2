@@ -1,18 +1,15 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-function adminClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
-}
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 /**
  * GET /api/admin/matches?status=needs_review or ?status=candidate,needs_review
  * Returns game_master_mappings for review UI (source_title, source_platform, source_cover_url, meta with top candidates).
  */
 export async function GET(req: Request) {
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
   const url = new URL(req.url);
   const statusParam = url.searchParams.get("status") ?? "needs_review";
   const statuses = statusParam.includes(",")

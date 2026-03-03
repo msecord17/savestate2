@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
+import { releaseHref } from "@/lib/routes";
 
 type ItemRow = {
   release_id: string;
@@ -123,7 +124,7 @@ export default function ListDetailPage() {
 
       {r.releases?.id && (
         <div style={{ marginTop: 8 }}>
-          <Link href={`/releases/${r.releases.id}`} style={{ color: "#2563eb" }}>
+          <Link href={releaseHref(r.releases.id)} style={{ color: "#2563eb" }}>
             Open details →
           </Link>
         </div>

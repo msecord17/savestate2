@@ -1,12 +1,6 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-function adminClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
-}
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 /**
  * POST /api/admin/matches/[id]/reject
@@ -16,6 +10,9 @@ export async function POST(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
   const { id } = await params;
   if (!id?.trim()) return NextResponse.json({ error: "Missing id" }, { status: 400 });
 

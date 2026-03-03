@@ -2,12 +2,22 @@
 
 import { GlassCard } from "@/components/ui/glass-card";
 import { resolveCoverUrl } from "@/lib/images/resolveCoverUrl";
-import { eraLabel, eraYears } from "@/lib/identity/eras";
+import { eraLabel, eraYears, toEraKey } from "@/lib/identity/eras";
 import type { EraTimelineItem } from "@/lib/identity/types";
 
 export type EraTimelineCardProps = {
   era: EraTimelineItem;
-  onSelect: () => void;
+  onSelect: (section?: "standouts" | "played_on" | "profile") => void;
+  /** When true, grey the card and disable click. */
+  disabled?: boolean;
+  playedOnByEra?: Record<
+    string,
+    {
+      total_releases: number;
+      handheld_share: number;
+      top_device: { display_name: string; source?: "manual" | "auto" } | null;
+    }
+  >;
 };
 
 /** One-line interpretation from games/releases density (client-side). */
@@ -32,29 +42,58 @@ function rankPillLabel(rank: number): string {
  * Single era card for the Timeline page. Uses cover fallback: game > release > placeholder.
  * Tap opens the Era Detail Panel (drawer / bottom sheet).
  */
-export function EraTimelineCard({ era, onSelect }: EraTimelineCardProps) {
+export function EraTimelineCard({ era, onSelect, disabled, playedOnByEra }: EraTimelineCardProps) {
   const interpretation = interpretationFromDensity(era.games, era.releases);
-  const pill = rankPillLabel(era.rank);
+  const pill = disabled ? "" : rankPillLabel(era.rank);
   const displayLabel = eraLabel(era.era);
   const displayYears = eraYears(era.era) || "—";
   const hasTopSignals = era.topSignals.length > 0;
   const defaultSubtext = `${era.games} games • ${era.releases} releases`;
 
+  const rawEraKey = (era as any).era ?? (era as any).key ?? null;
+  const eraKey = rawEraKey ? toEraKey(rawEraKey) : "unknown";
+
+  const po = (playedOnByEra as any)?.[eraKey] ?? null;
+
+  const tip =
+    po?.top_device?.display_name
+      ? `Most played on: ${po.top_device.display_name}${(po as any)?.top_device?.source === "auto" ? " (Auto)" : ""}`
+      : "";
+
+  const mixBadge =
+    po && (po.total_releases ?? 0) > 0
+      ? (po.total_releases ?? 0) >= 3
+        ? po.handheld_share >= 0.66
+          ? { label: "Handheld-heavy" }
+          : po.handheld_share <= 0.34
+            ? { label: "Console-heavy" }
+            : { label: "Mixed" }
+        : { label: "Played-on" } // 👈 new
+      : null;
+
   return (
     <GlassCard
-      interactive
-      className="cursor-pointer p-4 active:scale-[0.99]"
-      onClick={onSelect}
+      interactive={!disabled}
+      className={[
+        "p-4",
+        !disabled && "cursor-pointer active:scale-[0.99]",
+        disabled && "opacity-50 cursor-not-allowed",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      onClick={() => !disabled && onSelect(undefined)}
       role="button"
-      tabIndex={0}
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled}
       onKeyDown={(e) => {
+        if (disabled) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onSelect();
+          onSelect(undefined);
         }
       }}
     >
-      {/* Header: label + years (canonical fallback) + rank pill */}
+      {/* Header: label + years (canonical fallback) + rank pill + mix badge */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-slate-900 dark:text-white">
@@ -64,11 +103,26 @@ export function EraTimelineCard({ era, onSelect }: EraTimelineCardProps) {
             {displayYears}
           </p>
         </div>
-        {pill ? (
-          <span className="shrink-0 rounded-full border border-slate-200 bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-700 dark:border-white/15 dark:bg-white/10 dark:text-white/80">
-            {pill}
-          </span>
-        ) : null}
+        <div className="flex items-center gap-2 shrink-0">
+          {mixBadge ? (
+            <button
+              type="button"
+              title={tip || mixBadge.label}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect("played_on");
+              }}
+              className="text-[11px] rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-white/70"
+            >
+              {mixBadge.label}
+            </button>
+          ) : null}
+          {pill ? (
+            <span className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-700 dark:border-white/15 dark:bg-white/10 dark:text-white/80">
+              {pill}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       {/* One-line interpretation */}

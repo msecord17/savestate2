@@ -1,183 +1,63 @@
+// app/api/identity/summary/route.ts
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
 import { supabaseServer } from "@/lib/supabase/server";
-import {
-  computeIdentitySummaryFromRpc,
-  identitySignalsFromGetIdentitySignalsJson,
-  identitySignalsFromRpcRow,
-  identitySummaryFromArchetypes,
-  summaryFromCollectorArchetypes,
-  eraKeyFromPrimaryEra,
-  type IdentityRpcRow,
-  type IdentitySignalsRpcRow,
-  type GetIdentitySignalsJson,
-} from "@/lib/identity/compute";
-import { computeArchetypes } from "@/lib/identity/archetypes";
-import { computeCollectorArchetypes } from "@/lib/identity/collector-archetypes";
+import { loadIdentitySummary } from "@/lib/server/identity/loadIdentitySummary";
+import { normalizeTimeline } from "@/lib/identity/normalize-timeline";
+import { normalizeOriginTimeline } from "@/lib/identity/normalizeOriginTimeline";
 
-const CACHE_TTL_MS = 60 * 1000; // 1 minute per user
-const identitySignalsCache = new Map<
-  string,
-  { json: GetIdentitySignalsJson | null; expires: number }
->();
-
-function getCachedIdentitySignals(userId: string): GetIdentitySignalsJson | null | undefined {
-  const entry = identitySignalsCache.get(userId);
-  if (!entry) return undefined;
-  if (Date.now() > entry.expires) {
-    identitySignalsCache.delete(userId);
-    return undefined;
-  }
-  return entry.json;
-}
-
-function setCachedIdentitySignals(userId: string, json: GetIdentitySignalsJson | null): void {
-  identitySignalsCache.set(userId, { json, expires: Date.now() + CACHE_TTL_MS });
-}
-
-function toPlatformCounts(
-  raw: Record<string, number> | unknown
-): Record<string, number> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  return Object.fromEntries(
-    Object.entries(raw).map(([k, v]) => [k, Number(v)]).filter(([, v]) => Number.isFinite(v))
-  );
-}
-
-const one = (d: unknown): Record<string, unknown> | null =>
-  d == null ? null : Array.isArray(d) ? (d[0] as Record<string, unknown>) ?? null : (d as Record<string, unknown>);
-
-function toSignalsRow(r: Record<string, unknown>): IdentitySignalsRpcRow {
-  return {
-    owned_titles: Number(r.owned_titles ?? 0),
-    unique_platforms: Number(r.unique_platforms ?? 0),
-    era_span_years: Number(r.era_span_years ?? 0),
-    primary_era_share: Number(r.primary_era_share ?? 0),
-    primary_era_count: Number(r.primary_era_count ?? 0),
-    achievements_total: Number(r.achievements_total ?? 0),
-    completion_count: Number(r.completion_count ?? 0),
-    achievements_last_90d: Number(r.achievements_last_90d ?? 0),
-    era_key: typeof r.era_key === "string" ? r.era_key : "modern",
-  };
-}
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   const supabase = await supabaseRouteClient();
-  const { data: userRes } = await supabase.auth.getUser();
-  if (!userRes?.user) return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+  const { data: auth } = await supabase.auth.getUser();
+  const user = auth?.user;
 
-  const userId = userRes.user.id;
-  const admin = supabaseServer;
+  if (!user) {
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
 
-  // Prefer get_identity_signals RPC (with per-user cache) — use computed collector archetypes
-  let cached = getCachedIdentitySignals(userId);
-  if (cached !== undefined) {
-    const era_key = eraKeyFromPrimaryEra(cached?.primary_era_key);
-    const platformCounts = toPlatformCounts(cached?.platform_counts);
-    const collectorArchetypes = computeCollectorArchetypes({ identity_signals: cached ?? undefined }, platformCounts);
-    const summary = summaryFromCollectorArchetypes(collectorArchetypes, era_key);
-    const era_buckets = cached?.era_buckets ?? null;
-    const archetypes = collectorArchetypes.map((a) => ({
-      key: a.key,
-      label: a.label,
-      strength: a.strength,
-      score: a.score,
-      reasons: a.reasons,
-    }));
-    return NextResponse.json({
-      ...summary,
-      era_buckets,
-      identity_signals: { era_buckets },
-      archetypes,
+  try {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("user_id, username, display_name, avatar_url, gamer_score_v11")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    const { identity, played_on, played_on_by_era } = await loadIdentitySummary(supabaseServer as any, user.id, {
+      lifetimeScoreOverride: (profile as any)?.gamer_score_v11 ?? null,
     });
-  }
 
-  try {
-    const { data: rpcData } = await admin.rpc("get_identity_signals", { p_user_id: userId });
-    const json = rpcData as GetIdentitySignalsJson | null | undefined;
-    setCachedIdentitySignals(userId, json ?? null);
-    const era_key = eraKeyFromPrimaryEra(json?.primary_era_key);
-    const platformCounts = toPlatformCounts(json?.platform_counts);
-    const collectorArchetypes = computeCollectorArchetypes({ identity_signals: json ?? undefined }, platformCounts);
-    const summary = summaryFromCollectorArchetypes(collectorArchetypes, era_key);
-    const era_buckets = json?.era_buckets ?? null;
-    const archetypes = collectorArchetypes.map((a) => ({
-      key: a.key,
-      label: a.label,
-      strength: a.strength,
-      score: a.score,
-      reasons: a.reasons,
-    }));
-    return NextResponse.json({
-      ...summary,
-      era_buckets,
-      identity_signals: { era_buckets },
-      archetypes,
+    // Timeline: same as GameHome + /u/ — get_origin_timeline RPC → stats + standouts
+    let timeline: { stats: Record<string, { games: number; releases: number }>; standouts: Record<string, unknown[]> } | null = null;
+    const { data: timelinePayload, error: timelineErr } = await supabaseServer.rpc("get_origin_timeline", {
+      p_user_id: user.id,
     });
-  } catch {
-    // get_identity_signals may not exist; fall through to identity_signals then legacy
-  }
-
-  try {
-    const signalsRes = await admin.rpc("identity_signals", { p_user_id: userId });
-    const sigRow = one(signalsRes?.data);
-    if (sigRow) {
-      const signals = identitySignalsFromRpcRow(toSignalsRow(sigRow));
-      const results = computeArchetypes(signals);
-      const era_key = typeof sigRow.era_key === "string" ? sigRow.era_key : "modern";
-      const summary = identitySummaryFromArchetypes(results, era_key);
-      return NextResponse.json({
-        ...summary,
-        era_buckets: null,
-        identity_signals: { era_buckets: null },
-        archetypes: [],
-      });
+    if (!timelineErr && timelinePayload) {
+      const { origin } = normalizeTimeline(timelinePayload);
+      const { stats, standouts } = normalizeOriginTimeline(origin);
+      timeline = { stats: stats ?? {}, standouts: standouts ?? {} };
     }
-  } catch {
-    // identity_signals RPC may not exist; fall back to legacy RPCs
+
+    const flat = (identity as any)?.summary ?? identity;
+
+    return NextResponse.json({
+      ok: true,
+      user: {
+        user_id: user.id,
+        username: (profile as any)?.username ?? null,
+        display_name: (profile as any)?.display_name ?? null,
+        avatar_url: (profile as any)?.avatar_url ?? null,
+      },
+      identity: flat,
+      top_era: (identity as any)?.top_era ?? null,
+      era_buckets: (identity as any)?.era_buckets ?? null,
+      archetypes: (identity as any)?.archetypes ?? null,
+      timeline: timeline ?? { stats: {}, standouts: {} },
+      played_on,
+      played_on_by_era: played_on_by_era ?? {},
+    });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? "Failed" }, { status: 500 });
   }
-
-  let platform_counts = { psn: 0, xbox: 0, steam: 0, ra: 0, platform_spread_score: 0 };
-  let trophy_stats = { completion_score: 0, playtime_score: 0, has_any_completion: false };
-  let era_key = "modern";
-
-  try {
-    const [countRes, trophyRes, eraRes] = await Promise.all([
-      admin.rpc("identity_platform_counts", { p_user_id: userId }),
-      admin.rpc("identity_trophy_stats", { p_user_id: userId }),
-      admin.rpc("identity_era_anchor", { p_user_id: userId }),
-    ]);
-
-    const cr = one(countRes?.data);
-    if (cr) {
-      platform_counts = {
-        psn: Number(cr.psn ?? 0),
-        xbox: Number(cr.xbox ?? 0),
-        steam: Number(cr.steam ?? 0),
-        ra: Number(cr.ra ?? 0),
-        platform_spread_score: Number(cr.platform_spread_score ?? 0),
-      };
-    }
-    const tr = one(trophyRes?.data);
-    if (tr) {
-      trophy_stats = {
-        completion_score: Number(tr.completion_score ?? 0),
-        playtime_score: Number(tr.playtime_score ?? 0),
-        has_any_completion: Boolean(tr.has_any_completion),
-      };
-    }
-    const er = one(eraRes?.data);
-    if (er && typeof er.era_key === "string") era_key = er.era_key;
-  } catch {
-    // RPCs may not exist; use defaults so response is still valid
-  }
-
-  const row: IdentityRpcRow = { platform_counts, trophy_stats, era_key };
-  const summary = computeIdentitySummaryFromRpc(row);
-  return NextResponse.json({
-    ...summary,
-    era_buckets: null,
-    identity_signals: { era_buckets: null },
-    archetypes: [],
-  });
 }

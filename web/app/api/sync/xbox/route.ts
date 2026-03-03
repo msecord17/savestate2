@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
+import { supabaseServer } from "@/lib/supabase/server";
+import { recordSyncEnd, recordSyncStart } from "@/lib/sync/record-run";
 import { mergeReleaseInto } from "@/lib/merge-release-into";
 import { releaseExternalIdRow } from "@/lib/release-external-ids";
 import { getOrCreateGameForSync, upsertGameMasterMappingIngest } from "@/lib/sync-game-resolve";
@@ -44,14 +46,27 @@ function safeJson(text: string) {
 }
 
 export async function POST(req: Request) {
+  let runId: string | null = null;
+  const start = Date.now();
   try {
     const supabaseUser = await supabaseRouteClient();
     const { data: userRes, error: userErr } = await supabaseUser.auth.getUser();
 
     if (userErr || !userRes?.user) {
-      return NextResponse.json({ error: "Not logged in" }, { status: 401 });
+      return NextResponse.json({ ok: false, error: "Not logged in" }, { status: 401 });
     }
     const user = userRes.user;
+    runId = await recordSyncStart(supabaseServer, user.id, "xbox");
+    const endRun = async (
+      status: "ok" | "error",
+      opts?: { errorMessage?: string; resultJson?: unknown }
+    ) => {
+      await recordSyncEnd(supabaseServer, runId, status, {
+        durationMs: Date.now() - start,
+        errorMessage: opts?.errorMessage ?? undefined,
+        resultJson: opts?.resultJson ?? undefined,
+      });
+    };
 
     // Confirm token exists (best early debug signal)
     const { data: prof, error: pErr } = await supabaseUser
@@ -60,14 +75,16 @@ export async function POST(req: Request) {
       .eq("user_id", user.id)
       .maybeSingle();
 
-    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
+    if (pErr) {
+      await endRun("error", { errorMessage: pErr.message, resultJson: { error: pErr.message, detail: pErr.message } });
+      return NextResponse.json({ error: pErr.message }, { status: 500 });
+    }
 
     const tokenLen = String(prof?.xbox_access_token ?? "").length;
     if (!prof?.xbox_access_token) {
-      return NextResponse.json(
-        { error: "Missing xbox_access_token (connect Xbox first).", debug: { tokenLen } },
-        { status: 400 }
-      );
+      const errMsg = "Xbox not connected";
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail: { tokenLen } } });
+      return NextResponse.json({ ok: false, error: errMsg }, { status: 400 });
     }
 
     // Forward cookies so /api/xbox/titles sees the logged-in user
@@ -75,21 +92,44 @@ export async function POST(req: Request) {
     const cookie = h.get("cookie") ?? "";
     const origin = new URL(req.url).origin;
 
-    const titlesRes = await fetch(`${origin}/api/xbox/titles`, {
-      method: "GET",
-      headers: { cookie, accept: "application/json" },
-      cache: "no-store",
-    });
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 25_000);
+
+    let titlesRes: Response;
+    try {
+      titlesRes = await fetch(`${origin}/api/xbox/titles`, {
+        method: "GET",
+        headers: {
+          cookie,
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } catch (e: any) {
+      const errMsg =
+        e?.name === "AbortError"
+          ? "Xbox titles timed out"
+          : `Xbox titles fetch failed: ${e?.message ?? "unknown"}`;
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg } });
+      return NextResponse.json({ ok: false, error: errMsg }, { status: 504 });
+    } finally {
+      clearTimeout(t);
+    }
 
     const titlesText = await titlesRes.text();
 
     // HTML response means auth/cookies/redirect happened
     if (titlesText.trim().startsWith("<")) {
+      const errMsg = "Xbox titles returned HTML";
+      const detail = { status: titlesRes.status, tokenLen, html_snippet: titlesText.slice(0, 200) };
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail } });
       return NextResponse.json(
         {
           error: `Xbox titles returned HTML (status ${titlesRes.status})`,
           hint: "Usually means cookies not forwarded or titles route redirected to login.",
-          debug: { status: titlesRes.status, tokenLen, html_snippet: titlesText.slice(0, 200) },
+          debug: detail,
         },
         { status: 500 }
       );
@@ -97,13 +137,18 @@ export async function POST(req: Request) {
 
     const titlesJson = safeJson(titlesText);
     if (!titlesRes.ok) {
+      const errMsg = titlesJson?.error || `Xbox titles failed (${titlesRes.status})`;
+      const detail = titlesJson ?? titlesText.slice(0, 200);
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail } });
+      const status = titlesRes.status === 401 || titlesRes.status === 400 ? titlesRes.status : 500;
       return NextResponse.json(
         {
-          error: titlesJson?.error || `Xbox titles failed (${titlesRes.status})`,
-          detail: titlesJson ?? titlesText.slice(0, 200),
+          ok: false,
+          error: errMsg,
+          detail,
           debug: { status: titlesRes.status, tokenLen },
         },
-        { status: 500 }
+        { status }
       );
     }
 
@@ -121,7 +166,7 @@ export async function POST(req: Request) {
     }
 
     if (titles.length === 0) {
-      return NextResponse.json({
+      const payload = {
         ok: true,
         imported: 0,
         updated: 0,
@@ -134,7 +179,9 @@ export async function POST(req: Request) {
           titlesApiDebug: titlesJson?.debug,
           rawResponse: titlesJson,
         },
-      });
+      };
+      await endRun("ok", { resultJson: payload });
+      return NextResponse.json(payload);
     }
 
     // Admin client for catalog writes
@@ -372,8 +419,7 @@ export async function POST(req: Request) {
       .eq("user_id", user.id);
 
     if (profErr) {
-      // don’t fail the whole sync if stamping fails
-      return NextResponse.json({
+      const profPayload = {
         ok: true,
         imported,
         updated,
@@ -381,7 +427,10 @@ export async function POST(req: Request) {
         xuid,
         gamertag,
         warning: `Profile stamp failed: ${profErr.message}`,
-      });
+      };
+      await endRun("ok", { resultJson: profPayload });
+      // don’t fail the whole sync if stamping fails
+      return NextResponse.json(profPayload);
     }
 
     try {
@@ -390,7 +439,7 @@ export async function POST(req: Request) {
       // Non-fatal: sync succeeded; archetype snapshot will refresh on next GET or recompute
     }
 
-    return NextResponse.json({
+    const payload = {
       ok: true,
       imported,
       updated,
@@ -404,8 +453,16 @@ export async function POST(req: Request) {
         titlesApiDebug: titlesJson?.debug,
         titleNames: titles.map((t) => t.name),
       },
-    });
+    };
+    await endRun("ok", { resultJson: payload });
+    return NextResponse.json(payload);
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Xbox sync failed" }, { status: 500 });
+    const errMsg = e?.message ?? "Xbox sync failed";
+    await recordSyncEnd(supabaseServer, runId, "error", {
+      durationMs: Date.now() - start,
+      errorMessage: errMsg,
+      resultJson: { error: errMsg, detail: e?.stack ?? errMsg },
+    });
+    return NextResponse.json({ error: errMsg }, { status: 500 });
   }
 }

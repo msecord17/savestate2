@@ -9,6 +9,8 @@ export type IgdbHit = {
     cover_url: string | null;
     /** IGDB category: 0 = main_game, 1 = dlc, 2 = expansion, 3 = bundle, etc. Guardrail: only accept 0. */
     category?: number | null;
+    /** Platform names from IGDB (e.g. "Nintendo Entertainment System") for retro platform filter */
+    platform_names?: string[];
   };
   
   function normalizeCover(url: string | null) {
@@ -60,7 +62,8 @@ export type IgdbHit = {
     involved_companies.company.name,
     involved_companies.developer,
     involved_companies.publisher,
-    cover.url`;
+    cover.url,
+    platforms.name`;
 
   /** One IGDB search; returns parsed games array or null. */
   async function igdbSearchOne(query: string): Promise<any[] | null> {
@@ -147,6 +150,9 @@ export type IgdbHit = {
       typeof g?.first_release_date === "number"
         ? new Date(g.first_release_date * 1000).getUTCFullYear()
         : null;
+    const platformNames = Array.isArray(g?.platforms)
+      ? g.platforms.map((p: any) => p?.name).filter(Boolean)
+      : [];
     return {
       igdb_game_id: Number(g.id),
       title: String(g.name || fallbackTitle),
@@ -155,8 +161,9 @@ export type IgdbHit = {
       developer: devCompany ? String(devCompany) : null,
       publisher: pubCompany ? String(pubCompany) : null,
       first_release_year: year,
-      cover_url: normalizeCover(g?.cover?.url ?? null),
+      cover_url: normalizeCover(g?.cover?.url ?? null) ?? (g?.cover?.image_id ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${g.cover.image_id}.jpg` : null),
       category: g?.category != null ? Number(g.category) : null,
+      platform_names: platformNames.length ? platformNames : undefined,
     };
   }
 
@@ -191,15 +198,92 @@ export type IgdbHit = {
 
   const EDITION_BUNDLE_PATTERN = /\b(edition|remastered|definitive|deluxe|complete|anniversary|bundle|collection|pack|goty|game of the year)\b/i;
 
+  /** Rule B: candidate must not have these unless source has them (wrong mapping risk) */
+  const EDITION_BLOCKING_KEYWORDS = /\b(remix|remastered|funk|deluxe)\b/i;
+
+  /** Rule A: retro platforms — require platform mention or era-consistent year */
+  const RETRO_PLATFORMS = new Set([
+    "nes", "snes", "genesis", "n64", "gb", "gbc", "gba", "jaguar",
+    "sms", "gg", "ps1", "ps2", "psp", "saturn", "dc", "arcade",
+    "pcengine", "segacd", "32x", "sega32x", "ngp", "ngpc", "lynx", "vb",
+  ]);
+
+  /** Era year ranges for retro platforms (inclusive) — used when IGDB has no platform data */
+  const RETRO_ERA_YEARS: Record<string, [number, number]> = {
+    nes: [1983, 1995], snes: [1990, 2000], genesis: [1988, 1999], n64: [1996, 2002],
+    gb: [1989, 2001], gbc: [1998, 2003], gba: [2001, 2008], jaguar: [1993, 1996],
+    sms: [1985, 1992], gg: [1990, 1997], ps1: [1994, 2006], ps2: [2000, 2013],
+    psp: [2004, 2014], saturn: [1994, 2000], dc: [1998, 2001], arcade: [1975, 2025],
+    pcengine: [1987, 1994], segacd: [1991, 1996], "32x": [1994, 1996], sega32x: [1994, 1996],
+    ngp: [1998, 2001], ngpc: [1998, 2001], lynx: [1989, 1995], vb: [1995, 1996],
+  };
+
+  /** IGDB platform name substrings that map to our platform_key */
+  const RETRO_PLATFORM_MENTIONS: Record<string, string[]> = {
+    nes: ["nintendo entertainment system", "nes", "famicom"],
+    snes: ["super nintendo", "snes", "super famicom"],
+    genesis: ["genesis", "mega drive", "megadrive"],
+    n64: ["nintendo 64", "n64"],
+    gb: ["game boy"],
+    gbc: ["game boy color", "gbc"],
+    gba: ["game boy advance", "gba"],
+    jaguar: ["jaguar", "atari jaguar"],
+    sms: ["master system", "sms"],
+    gg: ["game gear"],
+    ps1: ["playstation", "ps1", "psx"],
+    ps2: ["playstation 2", "ps2"],
+    psp: ["psp", "playstation portable"],
+    saturn: ["saturn", "sega saturn"],
+    dc: ["dreamcast"],
+    "32x": ["32x", "sega 32x", "mega 32x"],
+    sega32x: ["32x", "sega 32x", "mega 32x"],
+  };
+
   /** IGDB category: 0=main_game, 1=dlc_addon, 2=expansion, 3=bundle, 7=season, 8=remake, 9=remaster, 11=port, 13=pack. */
   const CATEGORY_PREFERRED = new Set([0, 8, 9, 11]); // MAIN_GAME, REMASTER, REMAKE, PORT
   const CATEGORY_PENALIZED = new Set([1, 2, 3, 7, 13]); // DLC_ADDON, EXPANSION, BUNDLE, SEASON, PACK
   const TITLE_DLC_PACK_BUNDLE_SEASON = /\b(dlc|pack|bundle|season)\b/i;
 
   /**
+   * Rule B: edition keyword alignment — candidate must not have Remix/Remastered/Funk/Deluxe
+   * unless source title has it. Returns false if we should reject (do not attach).
+   */
+  function passesEditionAlignment(rawTitle: string, candidateTitle: string): boolean {
+    const rawHas = EDITION_BLOCKING_KEYWORDS.test(String(rawTitle));
+    const candidateHas = EDITION_BLOCKING_KEYWORDS.test(String(candidateTitle));
+    if (candidateHas && !rawHas) return false;
+    return true;
+  }
+
+  /**
+   * Rule A: for retro platforms, candidate must mention platform or have release year in era.
+   * Returns true if candidate passes (or platform is not retro).
+   */
+  function passesRetroPlatformFilter(
+    hit: IgdbHit,
+    platformKey: string | null
+  ): boolean {
+    if (!platformKey) return true;
+    const pk = platformKey.toLowerCase().trim();
+    if (!RETRO_PLATFORMS.has(pk)) return true;
+
+    const platformNames = (hit.platform_names ?? []).join(" ").toLowerCase();
+    const mentions = RETRO_PLATFORM_MENTIONS[pk];
+    if (mentions?.some((m) => platformNames.includes(m))) return true;
+
+    const year = hit.first_release_year;
+    if (year == null || !Number.isFinite(year)) return false;
+    const era = RETRO_ERA_YEARS[pk];
+    if (!era) return false;
+    const [lo, hi] = era;
+    return year >= lo && year <= hi;
+  }
+
+  /**
    * Score a single candidate for matching (deterministic): normalized title similarity (token overlap),
    * year closeness, edition/bundle penalty, category preference/penalty, optional tiny platform hint.
    * Returns 0..1. Used by pickBestCandidate — never "first result wins".
+   * Rule B: returns 0 if edition alignment fails (candidate has Remix/Remastered/Funk/Deluxe, source doesn't).
    */
   export function scoreCandidateForMatch(
     rawTitle: string,
@@ -209,6 +293,8 @@ export type IgdbHit = {
     hit?: IgdbHit,
     platformHint?: string
   ): number {
+    if (!passesEditionAlignment(rawTitle, candidateName)) return 0;
+
     const queryTokens = tokenize(cleanedTitle || rawTitle);
     const nameTokens = tokenize(String(candidateName || ""));
     if (queryTokens.length === 0) return 0;
@@ -255,19 +341,32 @@ export type IgdbHit = {
     return Math.max(0, score);
   }
 
+  /** Base token overlap (0..1) for Rule B threshold — used for similarity > 0.92 check */
+  function tokenOverlapSimilarity(cleanedTitle: string, candidateName: string): number {
+    const queryTokens = tokenize(cleanedTitle);
+    const nameTokens = tokenize(String(candidateName || ""));
+    if (queryTokens.length === 0) return 0;
+    let overlap = 0;
+    for (const t of queryTokens) {
+      if (nameTokens.includes(t)) overlap++;
+    }
+    return overlap / queryTokens.length;
+  }
+
   export type PickBestResult =
     | { status: "auto_matched"; candidate: IgdbHit; score: number; scored: Array<{ hit: IgdbHit; score: number }> }
     | { status: "needs_review"; score: number; scored: Array<{ hit: IgdbHit; score: number }> }
     | { status: "unmatched"; scored: Array<{ hit: IgdbHit; score: number }> };
 
-  /** Fail closed: only write igdb_game_id/cover_url when confidence >= 0.84. Below: queue for review, do not write. */
-  const AUTO_MATCH_THRESHOLD = 0.84;
+  /** Rule B: require confidence >= 0.92 and base similarity > 0.92. Missing mapping OK; wrong mapping isn't. */
+  const AUTO_MATCH_THRESHOLD = 0.92;
   const NEEDS_REVIEW_THRESHOLD = 0.65;
 
   /**
    * Pick best candidate from IGDB hits: score each deterministically (title similarity, year closeness, category, optional platform hint), then apply thresholds.
-   * best >= 0.84 => auto_matched; 0.65–0.84 => needs_review (do not set igdb_game_id); else unmatched.
-   * Never "first result wins" — always sort by score.
+   * Rule A: For retro platforms, filter to candidates that mention platform or have era-consistent year; else do not attach.
+   * Rule B: Require score >= 0.92 AND base token overlap > 0.92 AND edition alignment. Otherwise leave unmapped.
+   * best >= 0.92 + similarity + edition => auto_matched; 0.65–0.92 => needs_review; else unmatched.
    */
   export function pickBestCandidate(
     candidates: IgdbHit[],
@@ -277,14 +376,26 @@ export type IgdbHit = {
     platformHint?: string | null
   ): PickBestResult {
     if (candidates.length === 0) return { status: "unmatched", scored: [] };
-    const scored = candidates.map((hit) => ({
+
+    let filtered = candidates;
+    if (platformHint && RETRO_PLATFORMS.has(platformHint.toLowerCase().trim())) {
+      filtered = candidates.filter((hit) => passesRetroPlatformFilter(hit, platformHint));
+      if (filtered.length === 0) return { status: "unmatched", scored: [] };
+    }
+
+    const scored = filtered.map((hit) => ({
       hit,
       score: scoreCandidateForMatch(rawTitle, cleanedTitle, hit.title, yearHint ?? hit.first_release_year ?? undefined, hit, platformHint ?? undefined),
     }));
     scored.sort((a, b) => b.score - a.score);
     const best = scored[0];
     if (!best) return { status: "unmatched", scored };
-    if (best.score >= AUTO_MATCH_THRESHOLD)
+
+    const baseSimilarity = tokenOverlapSimilarity(cleanedTitle || rawTitle, best.hit.title);
+    const passesRuleB = best.score >= AUTO_MATCH_THRESHOLD && baseSimilarity >= 0.92
+      && passesEditionAlignment(rawTitle, best.hit.title);
+
+    if (passesRuleB)
       return { status: "auto_matched", candidate: best.hit, score: best.score, scored };
     if (best.score >= NEEDS_REVIEW_THRESHOLD)
       return { status: "needs_review", score: best.score, scored };

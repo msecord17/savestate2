@@ -1,14 +1,8 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { igdbFetchGameById, normalizeCanonicalTitle } from "@/lib/igdb/server";
 import { upsertGameExternalId, gameExternalIdRow } from "@/lib/game-external-ids";
-
-function adminClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
-}
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 /**
  * POST /api/admin/mappings/override
@@ -17,6 +11,9 @@ function adminClient() {
  * set status = 'confirmed' when locked !== false. Same effect as approve but keyed by source + external_id.
  */
 export async function POST(req: Request) {
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
   let body: { source?: string; external_id?: string; igdb_game_id?: number; locked?: boolean };
   try {
     body = await req.json();

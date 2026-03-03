@@ -1,12 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseRouteClient } from "@/lib/supabase/route-client";
-
-function normalizeCover(url: string | null): string | null {
-  if (!url) return null;
-  const u = url.startsWith("//") ? `https:${url}` : url;
-  return u.replace("t_thumb", "t_cover_big");
-}
+import { igdbFetchGameById } from "@/lib/igdb/server";
 
 export async function POST(req: Request) {
   const supabaseUser = await supabaseRouteClient();
@@ -19,17 +14,11 @@ export async function POST(req: Request) {
   const gameId = String(body?.game_id ?? "").trim();
   const igdbGameIdRaw = body?.igdb_game_id;
   const igdbGameId = igdbGameIdRaw != null ? Number(igdbGameIdRaw) : NaN;
-  const alsoFillCover = body?.fill_cover !== false; // default true
+  const alsoFillMetadata = body?.fill_cover !== false; // default true
 
   if (!gameId) return NextResponse.json({ error: "Missing game_id" }, { status: 400 });
   if (!Number.isFinite(igdbGameId) || igdbGameId <= 0) {
     return NextResponse.json({ error: "Missing/invalid igdb_game_id" }, { status: 400 });
-  }
-
-  const clientId = process.env.IGDB_CLIENT_ID;
-  const token = process.env.IGDB_ACCESS_TOKEN;
-  if (!clientId || !token) {
-    return NextResponse.json({ error: "Missing IGDB env vars" }, { status: 500 });
   }
 
   const supabaseAdmin = createClient(
@@ -37,46 +26,37 @@ export async function POST(req: Request) {
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
 
-  // Fetch cover for this IGDB id (optional)
-  let coverUrl: string | null = null;
-  if (alsoFillCover) {
-    const q = `
-      fields id,cover.url;
-      where id = (${igdbGameId});
-      limit 1;
-    `;
-    const r = await fetch("https://api.igdb.com/v4/games", {
-      method: "POST",
-      headers: {
-        "Client-ID": clientId,
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "text/plain",
-      },
-      body: q,
-      cache: "no-store",
-    });
-    const text = await r.text();
-    const j = text ? JSON.parse(text) : null;
-    if (r.ok && Array.isArray(j) && j[0]?.cover?.url) {
-      coverUrl = normalizeCover(String(j[0].cover.url));
+  const now = new Date().toISOString();
+  const patch: Record<string, unknown> = {
+    igdb_game_id: igdbGameId,
+    updated_at: now,
+  };
+
+  if (alsoFillMetadata) {
+    const meta = await igdbFetchGameById(igdbGameId);
+    if (meta) {
+      if (meta.cover_url) patch.cover_url = meta.cover_url;
+      if (meta.summary != null) patch.summary = meta.summary;
+      if (meta.developer != null) patch.developer = meta.developer;
+      if (meta.publisher != null) patch.publisher = meta.publisher;
+      if (meta.first_release_year != null) patch.first_release_year = meta.first_release_year;
+      if (Array.isArray(meta.genres) && meta.genres.length) patch.genres = meta.genres;
     }
   }
-
-  const patch: any = {
-    igdb_game_id: igdbGameId,
-    updated_at: new Date().toISOString(),
-  };
-  if (alsoFillCover && coverUrl) patch.cover_url = coverUrl;
 
   const { error: uErr } = await supabaseAdmin.from("games").update(patch).eq("id", gameId);
   if (uErr) return NextResponse.json({ error: uErr.message }, { status: 500 });
 
+  const coverUrl = (patch.cover_url as string) ?? null;
+  if (coverUrl) {
+    await supabaseAdmin.from("releases").update({ cover_url: coverUrl, updated_at: now }).eq("game_id", gameId);
+  }
   return NextResponse.json({
     ok: true,
     game_id: gameId,
     igdb_game_id: igdbGameId,
     cover_url: coverUrl,
-    note: coverUrl ? "IGDB id set; cover filled." : "IGDB id set; no cover returned.",
+    note: coverUrl ? "IGDB id set; cover + metadata filled." : "IGDB id set; no cover returned.",
   });
 }
 

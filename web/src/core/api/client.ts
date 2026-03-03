@@ -10,7 +10,11 @@ const getBase = (): string => {
 
 export async function apiGet<T>(path: string, options?: RequestInit): Promise<T> {
   const base = getBase();
-  const res = await fetch(`${base}${path}`, { cache: "no-store", ...options });
+  const res = await fetch(`${base}${path}`, {
+    cache: "no-store",
+    credentials: "include",
+    ...options,
+  });
   const data = await res.json().catch(() => null);
   if (!res.ok) throw new Error(data?.error ?? `Request failed (${res.status})`);
   return data as T;
@@ -21,6 +25,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${base}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: body != null ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => null);

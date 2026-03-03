@@ -4,7 +4,7 @@ import { supabaseServer } from "@/lib/supabase/server";
 import {
   identitySignalsFromGetIdentitySignalsJson,
   identitySummaryFromArchetypes,
-  eraKeyFromPrimaryEra,
+  normalizeEraKey,
   type GetIdentitySignalsJson,
 } from "@/lib/identity/compute";
 import { computeArchetypes } from "@/lib/identity/archetypes";
@@ -136,7 +136,7 @@ export async function POST() {
       const json = signalsJson as GetIdentitySignalsJson;
       const signals = identitySignalsFromGetIdentitySignalsJson(json);
       const results = computeArchetypes(signals);
-      const eraKey = eraKeyFromPrimaryEra(json?.primary_era_key);
+      const eraKey = normalizeEraKey(json?.primary_era_key ?? json?.top_era_weighted);
       const summary = identitySummaryFromArchetypes(results, eraKey);
       snapshot = buildSnapshot(summary, json, username);
     }

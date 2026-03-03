@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { ORIGIN_ORDER } from "@/lib/identity/era";
-import { ERA_META } from "@/lib/identity/eras";
+import { ORIGIN_BUCKET_META, ORIGIN_BUCKET_ORDER } from "@/lib/identity/era";
 import {
   identitySignalsFromGetIdentitySignalsJson,
   identitySummaryFromArchetypes,
-  eraKeyFromPrimaryEra,
+  normalizeEraKey,
   type GetIdentitySignalsJson,
 } from "@/lib/identity/compute";
+import { normalizeTimeline } from "@/lib/identity/normalize-timeline";
+import { normalizeOriginTimeline } from "@/lib/identity/normalizeOriginTimeline";
 import { computeArchetypes } from "@/lib/identity/archetypes";
 import type { EraTimelineItem, TimelineResponse } from "@/lib/identity/types";
 
@@ -26,24 +27,6 @@ type ShareSnapshot = {
     minutes_played?: number;
     era_buckets?: Record<string, { games: number; releases: number }>;
   };
-};
-
-/** Origin timeline RPC payload. */
-type OriginTimelinePayload = {
-  stats?: Record<string, { games: number; releases: number }> | null;
-  standouts?: Record<
-    string,
-    Array<{
-      release_id: string;
-      title: string;
-      cover_url: string | null;
-      played_on: string | null;
-      earned?: number;
-      total?: number;
-      minutes_played?: number;
-      score?: number;
-    }>
-  > | null;
 };
 
 function adminClient() {
@@ -144,7 +127,8 @@ export async function GET(
     }
     const signals = identitySignalsFromGetIdentitySignalsJson(signalsJson as GetIdentitySignalsJson);
     const results = computeArchetypes(signals);
-    const eraKey = eraKeyFromPrimaryEra((signalsJson as GetIdentitySignalsJson)?.primary_era_key);
+    const sig = signalsJson as GetIdentitySignalsJson;
+    const eraKey = normalizeEraKey(sig?.primary_era_key ?? sig?.top_era_weighted);
     const summary = identitySummaryFromArchetypes(results, eraKey);
     card = toSharePayload(summary, signalsJson as GetIdentitySignalsJson);
   }
@@ -155,14 +139,16 @@ export async function GET(
 
   let timeline: TimelineResponse | null = null;
   if (!timelineErr && timelinePayload) {
-    const pl = timelinePayload as OriginTimelinePayload;
-    const stats = pl?.stats ?? {};
-    const standouts = pl?.standouts ?? {};
-    const bucketKeys = Object.keys(stats).filter((k) => k !== "unknown");
-    const eraStats = bucketKeys.map((key) => ({
+    const { origin } = normalizeTimeline(timelinePayload);
+    const { stats, standouts } = normalizeOriginTimeline(origin);
+    const buckets = ORIGIN_BUCKET_ORDER.filter((k) => k !== "unknown");
+    const s = stats ?? {};
+    const so = standouts ?? {};
+
+    const eraStats = buckets.map((key) => ({
       key,
-      games: Number((stats[key] as { games?: number })?.games ?? 0),
-      releases: Number((stats[key] as { releases?: number })?.releases ?? 0),
+      games: Number((s[key] as { games?: number })?.games ?? 0),
+      releases: Number((s[key] as { releases?: number })?.releases ?? 0),
     }));
     eraStats.sort((a, b) => {
       if (b.games !== a.games) return b.games - a.games;
@@ -173,9 +159,11 @@ export async function GET(
       rankByKey[s.key] = i + 1;
     });
 
-    const eras: EraTimelineItem[] = eraStats.map(({ key, games, releases }) => {
-      const meta = ERA_META[key as keyof typeof ERA_META];
-      const notableList = Array.isArray(standouts[key]) ? standouts[key]! : [];
+    const eras: EraTimelineItem[] = buckets.map((bucketKey) => {
+      const meta = ORIGIN_BUCKET_META[bucketKey];
+      const games = Number((s[bucketKey] as { games?: number })?.games ?? 0);
+      const releases = Number((s[bucketKey] as { releases?: number })?.releases ?? 0);
+      const notableList = Array.isArray(so[bucketKey]) ? so[bucketKey]! : [];
       const notable = notableList.slice(0, 3).map((n) => ({
         release_id: String(n.release_id ?? ""),
         title: String(n.title ?? "Untitled"),
@@ -187,10 +175,10 @@ export async function GET(
       }));
 
       return {
-        era: key,
-        label: meta?.label ?? key,
-        years: meta?.years ?? "",
-        rank: rankByKey[key] ?? 0,
+        era: bucketKey,
+        label: meta?.title ?? bucketKey,
+        years: meta?.sub ?? "",
+        rank: rankByKey[bucketKey] ?? 0,
         games,
         releases,
         topSignals: [],
@@ -199,8 +187,8 @@ export async function GET(
     });
 
     eras.sort((a, b) => {
-      const ia = ORIGIN_ORDER.indexOf(a.era);
-      const ib = ORIGIN_ORDER.indexOf(b.era);
+      const ia = ORIGIN_BUCKET_ORDER.indexOf(a.era);
+      const ib = ORIGIN_BUCKET_ORDER.indexOf(b.era);
       return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
     });
 

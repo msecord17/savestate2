@@ -1,15 +1,16 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 /**
  * POST: merge games that share the same igdb_game_id.
  * Body: { igdb_game_id: number } — find all games with this igdb_game_id, pick a winner (e.g. the one with most metadata), repoint releases.game_id to winner, delete losers.
  */
 export async function POST(req: Request) {
-  const admin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
+  const admin = adminClient();
 
   let body: { igdb_game_id?: number };
   try {

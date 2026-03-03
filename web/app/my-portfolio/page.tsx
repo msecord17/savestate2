@@ -2,21 +2,22 @@
 
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
+import { releaseHref } from "@/lib/routes";
+import PhysicalIntakeCard from "@/components/portfolio/PhysicalIntakeCard";
 
 type PortfolioRow = {
   release_id: string;
   status: string;
-  releases: {
+  release?: {
     id: string;
-    display_title: string;
-    platform_name: string;
+    display_title?: string | null;
     platform_key?: string | null;
     cover_url?: string | null;
-    games?: {
-      first_release_year?: number | null;
-      developer?: string | null;
-      genres?: any | null;
+    game?: {
+      id: string;
+      canonical_title?: string | null;
       cover_url?: string | null;
+      first_release_year?: number | null;
     } | null;
   } | null;
 };
@@ -29,6 +30,56 @@ export default function MyPortfolioPage() {
 
   const [myLists, setMyLists] = useState<any[]>([]);
   const [listCounts, setListCounts] = useState<Record<string, number>>({});
+  const [physical, setPhysical] = useState<any[]>([]);
+  const [physicalErr, setPhysicalErr] = useState("");
+
+  const [hardware, setHardware] = useState<any[]>([]);
+  const [playedOnMap, setPlayedOnMap] = useState<Record<string, any>>({});
+  const [defaultRaHardwareId, setDefaultRaHardwareId] = useState<string | null>(null);
+
+  function loadHardware() {
+    fetch("/api/hardware/list")
+      .then((r) => r.json())
+      .then((d) => setHardware(d?.ok ? (d.items ?? []) : []))
+      .catch(() => setHardware([]));
+  }
+
+  function loadPlayedOn() {
+    fetch("/api/portfolio/played-on/list")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d?.ok) return setPlayedOnMap({});
+        const map: Record<string, any> = {};
+        for (const it of d.items ?? []) map[it.release_id] = it;
+        setPlayedOnMap(map);
+      })
+      .catch(() => setPlayedOnMap({}));
+  }
+
+  function loadDefaultRaDevice() {
+    fetch("/api/profile/default-ra-device")
+      .then((r) => r.json())
+      .then((d) => setDefaultRaHardwareId(d?.ok ? (d.default_ra_hardware_id ?? null) : null))
+      .catch(() => setDefaultRaHardwareId(null));
+  }
+
+  async function setDefaultRaDevice(hardware_id: string | null) {
+    await fetch("/api/profile/default-ra-device", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hardware_id }),
+    });
+    loadDefaultRaDevice();
+  }
+
+  async function setPlayedOn(release_id: string, hardware_slug: string | null) {
+    await fetch("/api/portfolio/played-on/set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ release_id, hardware_slug, source: "manual" }),
+    });
+    loadPlayedOn();
+  }
 
   async function refresh() {
     try {
@@ -70,9 +121,20 @@ export default function MyPortfolioPage() {
     refresh();
   }
 
+  function loadPhysical() {
+    setPhysicalErr("");
+    fetch("/api/portfolio/physical/list")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) setPhysical(Array.isArray(d.items) ? d.items : []);
+        else setPhysicalErr(d?.error || "Failed to load physical items");
+      })
+      .catch(() => setPhysicalErr("Failed to load physical items"));
+  }
+
   const filtered = useMemo(() => {
     return rows.filter((r) => {
-      const rel = r.releases;
+      const rel = r.release;
 
       // Source filter (platform_key)
       if (sourceFilter !== "all") {
@@ -108,6 +170,11 @@ export default function MyPortfolioPage() {
       .then((r) => r.json())
       .then((d) => setListCounts(d?.counts ?? {}))
       .catch(() => setListCounts({}));
+
+    loadPhysical();
+    loadHardware();
+    loadPlayedOn();
+    loadDefaultRaDevice();
   }, []);
 
   return (
@@ -118,6 +185,125 @@ export default function MyPortfolioPage() {
         <Link href="/add-games" style={{ color: "#2563eb" }}>
           + Add games
         </Link>
+      </div>
+
+      <div
+        style={{
+          marginTop: 12,
+          marginBottom: 16,
+          border: "1px solid #e5e7eb",
+          borderRadius: 12,
+          padding: 12,
+          background: "white",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+          <div>
+            <div style={{ fontWeight: 900, fontSize: 16 }}>Physical collection</div>
+            <div style={{ color: "#64748b", fontSize: 13, marginTop: 2 }}>
+              Quick manual entries for owned games/systems/accessories.
+            </div>
+          </div>
+
+          <Link href="/add-physical" style={{ color: "#2563eb", fontSize: 13 }}>
+            + Add physical
+          </Link>
+        </div>
+
+        {physicalErr ? (
+          <div style={{ color: "#b91c1c", marginTop: 10, fontSize: 13 }}>{physicalErr}</div>
+        ) : (
+          <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+            {physical.length === 0 ? (
+              <div style={{ color: "#6b7280", fontSize: 13 }}>
+                No physical items yet.
+              </div>
+            ) : (
+              physical.slice(0, 8).map((it) => (
+                <div
+                  key={it.id}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    padding: "8px 10px",
+                    borderRadius: 10,
+                    border: "1px solid #e5e7eb",
+                    background: "#f8fafc",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {it.title}
+                    </div>
+                    <div style={{ color: "#64748b", fontSize: 12, marginTop: 2 }}>
+                      {it.kind ?? "other"}
+                      {it.platform_key ? ` • ${it.platform_key}` : ""}
+                      {it.condition ? ` • ${it.condition}` : ""}
+                      {it.quantity ? ` • x${it.quantity}` : ""}
+                    </div>
+                  </div>
+                  <div style={{ color: "#94a3b8", fontSize: 12, flexShrink: 0 }}>
+                    {it.created_at ? new Date(it.created_at).toLocaleDateString() : ""}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 12, marginBottom: 16, border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: "white" }}>
+        <div style={{ fontWeight: 900, marginBottom: 6 }}>RetroAchievements default device</div>
+        <div style={{ color: "#64748b", fontSize: 13, marginBottom: 8 }}>
+          Used when we can't detect hardware. New RA sync will auto-assign to this device unless you override per game.
+        </div>
+        <select
+          value={defaultRaHardwareId ?? ""}
+          onChange={(e) => setDefaultRaDevice(e.target.value || null)}
+          style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white" }}
+        >
+          <option value="">None</option>
+          {hardware
+            .filter((h) => h.kind === "handheld" || h.kind === "console")
+            .map((h) => (
+              <option key={h.id} value={h.id}>
+                {h.display_name}
+              </option>
+            ))}
+        </select>
+      </div>
+
+      <div style={{ position: "sticky", top: 12, zIndex: 20 }}>
+        <div
+          style={{
+            marginTop: 12,
+            marginBottom: 16,
+            border: "1px solid #e5e7eb",
+            borderRadius: 12,
+            padding: 12,
+            background: "white",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontWeight: 900, fontSize: 14 }}>Quick add</div>
+            <div style={{ color: "#64748b", fontSize: 13, marginTop: 2 }}>
+              Add physical games / hardware without scrolling into oblivion.
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <Link href="/add-games" style={{ color: "#2563eb", fontWeight: 800 }}>
+              + Add digital game
+            </Link>
+          </div>
+        </div>
+
+          <div style={{ marginTop: 10 }}>
+            <PhysicalIntakeCard onCreated={loadPhysical} />
+          </div>
+        </div>
       </div>
 
       {loading && <div style={{ color: "#6b7280" }}>Loading…</div>}
@@ -159,7 +345,8 @@ export default function MyPortfolioPage() {
 
       <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
         {filtered.map((r) => {
-          const rel = r.releases;
+          const rel = r.release;
+          const title = rel?.display_title ?? rel?.game?.canonical_title ?? "Untitled";
 
           return (
             <div
@@ -185,7 +372,7 @@ export default function MyPortfolioPage() {
                   }}
                 >
                   {(() => {
-                    const coverUrl = rel?.games?.cover_url ?? rel?.cover_url;
+                    const coverUrl = rel?.game?.cover_url ?? rel?.cover_url;
                     const cover =
                       coverUrl &&
                       !coverUrl.includes("unknown.png") &&
@@ -195,7 +382,7 @@ export default function MyPortfolioPage() {
                     return (
                       <img
                         src={cover}
-                        alt={rel?.display_title ?? "Cover"}
+                        alt={title}
                         style={{
                           width: "100%",
                           height: "100%",
@@ -210,7 +397,7 @@ export default function MyPortfolioPage() {
                 <div style={{ flex: 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
   <div style={{ fontWeight: 900 }}>
-    {rel ? rel.display_title : "Missing release"}
+    {title}
   </div>
 
   {rel?.platform_key === "steam" && (
@@ -267,51 +454,12 @@ export default function MyPortfolioPage() {
 
 
                   <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>
-                    {rel?.platform_name ?? "—"} • Status:{" "}
+                    {rel?.platform_key ?? "—"} • Status:{" "}
                     <strong>{String(r.status ?? "").replace("_", " ")}</strong>
+                    {rel?.game?.first_release_year ? (
+                      <span> • {rel.game.first_release_year}</span>
+                    ) : null}
                   </div>
-                  
-                  {rel?.games && (
-  <div
-    style={{
-      color: "#64748b",
-      fontSize: 13,
-      marginTop: 4,
-      display: "flex",
-      gap: 8,
-      flexWrap: "wrap",
-    }}
-  >
-    {rel.games.first_release_year ? (
-      <span>{rel.games.first_release_year}</span>
-    ) : null}
-
-    {rel.games.developer ? (
-      <span>• {rel.games.developer}</span>
-    ) : null}
-
-    {Array.isArray(rel.games.genres) && rel.games.genres.length > 0 ? (
-      <span style={{ display: "inline-flex", gap: 6 }}>
-        {rel.games.genres.slice(0, 2).map((g: string) => (
-          <span
-            key={g}
-            style={{
-              fontSize: 12,
-              padding: "2px 8px",
-              borderRadius: 999,
-              border: "1px solid #e5e7eb",
-              background: "white",
-              color: "#0f172a",
-              lineHeight: 1.2,
-            }}
-          >
-            {g}
-          </span>
-        ))}
-      </span>
-    ) : null}
-  </div>
-)}
 
                   {(listCounts[r.release_id] ?? 0) > 0 && (
                     <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>
@@ -375,9 +523,33 @@ export default function MyPortfolioPage() {
                       </select>
                     )}
 
+                    {/* Played On */}
+                    <div style={{ marginTop: 8 }}>
+                      <div style={{ color: "#64748b", fontSize: 12, marginBottom: 4 }}>Played On</div>
+                      <select
+                        value={playedOnMap[r.release_id]?.hardware?.slug ?? ""}
+                        onChange={(e) => setPlayedOn(r.release_id, e.target.value || null)}
+                        style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #e5e7eb", background: "white" }}
+                      >
+                        <option value="">Played on…</option>
+                        {hardware
+                          .filter((h) => h.kind === "handheld" || h.kind === "console" || h.kind === "computer")
+                          .map((h) => (
+                            <option key={h.id} value={h.slug ?? h.id}>
+                              {h.display_name ?? h.slug}
+                            </option>
+                          ))}
+                      </select>
+                      {playedOnMap[r.release_id]?.hardware?.display_name ? (
+                        <div style={{ color: "#64748b", fontSize: 12, marginTop: 4 }}>
+                          Selected: <strong>{playedOnMap[r.release_id].hardware.display_name}</strong>
+                        </div>
+                      ) : null}
+                    </div>
+
                     {rel?.id && (
                       <Link
-                        href={`/releases/${rel.id}`}
+                        href={releaseHref(rel.id)}
                         style={{ color: "#2563eb", fontSize: 13 }}
                       >
                         Open details →

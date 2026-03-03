@@ -84,7 +84,14 @@ If the **API route** returns 404 on the deployed site (not 401/500), the request
 - **Redeploy**  
   After setting Root Directory to `web`, use **Redeploy** in Vercel (Deployments → ⋮ → Redeploy) so the new setting is used.
 
-**Verified (this repo):** `web/app/api/identity/summary/route.ts` and `web/app/api/ping/route.ts` are in the committed tree. They should both exist in the build when Root Directory is `web`.
+**Verified (this repo):** `web/app/api/identity/route.ts` (redirects to summary), `web/app/api/identity/summary/route.ts`, and `web/app/api/ping/route.ts` are in the committed tree. They should both exist in the build when Root Directory is `web`.
+
+**Identity API route map:**
+- `GET /api/identity` → 307 redirect to `/api/identity/summary`
+- `GET /api/identity/summary` → identity summary (archetypes, era, signals)
+- `GET /api/identity/timeline` → era timeline
+- `GET /api/identity/share` → create share
+- `GET /api/identity/share/[shareId]` → share by ID
 
 ## Quick debug on hosted
 

@@ -13,6 +13,7 @@ export async function xblAuthenticate(accessToken: string) {
       "Content-Type": "application/json",
       "Accept-Language": "en-US",
       Accept: "application/json",
+      "x-xbl-contract-version": "1",
     },
     body: JSON.stringify({
       Properties: {
@@ -41,7 +42,7 @@ export async function xstsAuthorize(xblToken: string) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Accept-Language": "en-US",
+      "x-xbl-contract-version": "1",
       Accept: "application/json",
     },
     body: JSON.stringify({

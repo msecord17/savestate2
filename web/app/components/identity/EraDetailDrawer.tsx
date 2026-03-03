@@ -12,6 +12,16 @@ import { toEraKey } from "@/lib/identity/eras";
 /** Map canonical era keys to ERA_THEME keys for accent color. Legacy keys normalized via toEraKey. */
 const ERA_BUCKET_TO_THEME: Record<string, string> = {
   gen1_1972_1977: "atari",
+  gen2_1978_1982: "nes",
+  gen3_1983_1989: "nes",
+  gen4_1990_1995: "snes",
+  gen5_1996_1999: "ps1",
+  gen6_2000_2005: "ps2",
+  gen7_2006_2012: "ps3_360",
+  gen8_2013_2019: "modern",
+  gen9_2020_plus: "modern",
+  unknown: "modern",
+  // Legacy
   gen2_1976_1984: "nes",
   gen3_1983_1992: "nes",
   gen4_1987_1996: "snes",
@@ -19,9 +29,27 @@ const ERA_BUCKET_TO_THEME: Record<string, string> = {
   gen5b_1996_2001: "ps1",
   gen6_1998_2005: "ps2",
   gen7_2005_2012: "ps3_360",
-  gen8_2013_2019: "modern",
-  gen9_2020_plus: "modern",
-  unknown: "modern",
+};
+
+export type EraProfile = {
+  owned_games?: number;
+  owned_releases?: number;
+  share_pct?: number; // 0..1
+  top_platforms?: string[]; // optional
+  most_played_on?: { name: string; source: "manual" | "auto"; also?: string[] } | null;
+};
+
+export type DrawerSection = "standouts" | "played_on" | "profile";
+
+type EraPlayedOn = {
+  total_releases: number;
+  handheld_share: number;
+  top_device: {
+    display_name: string;
+    releases?: number;
+    source?: "manual" | "auto";
+  } | null;
+  top_devices?: { display_name: string; releases?: number; source?: "manual" | "auto" }[];
 };
 
 export type NotableGame = {
@@ -54,6 +82,12 @@ export type EraDetailDrawerProps = {
   primaryArchetypeKey?: string | null;
   /** When achievements chip is from < 3 titles, e.g. "Based on 2 titles with achievements." */
   achievementsClarification?: string | null;
+  /** Era-scoped stats (owned, share, platforms). Rendered above snapshot. */
+  eraProfile?: EraProfile | null;
+  /** Initial section to scroll to when drawer opens. */
+  initialSection?: DrawerSection;
+  /** Era-scoped played-on summary (devices, handheld share). */
+  eraPlayedOn?: EraPlayedOn | null;
 };
 
 export function EraDetailDrawer({
@@ -68,11 +102,37 @@ export function EraDetailDrawer({
   archetypeSnapshot,
   primaryArchetypeKey,
   achievementsClarification,
+  eraProfile,
+  initialSection,
+  eraPlayedOn,
 }: EraDetailDrawerProps) {
   const themeKey = eraKey ? ERA_BUCKET_TO_THEME[toEraKey(eraKey)] ?? "modern" : "modern";
   const eraTheme = ERA_THEME[themeKey] ?? ERA_THEME_DEFAULT;
   const reduce = useReducedMotion();
   const sectionVariants = reduce ? undefined : fadeUp;
+
+  const standoutsRef = React.useRef<HTMLDivElement>(null);
+  const playedOnRef = React.useRef<HTMLDivElement>(null);
+  const profileRef = React.useRef<HTMLDivElement>(null);
+
+  const sectionToShow = initialSection ?? "profile";
+
+  React.useEffect(() => {
+    if (!open) return;
+
+    const t = window.setTimeout(() => {
+      const el =
+        sectionToShow === "played_on"
+          ? playedOnRef.current
+          : sectionToShow === "standouts"
+            ? standoutsRef.current
+            : profileRef.current;
+
+      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+
+    return () => window.clearTimeout(t);
+  }, [open, sectionToShow]);
 
   const title = `Origin era: ${eraLabel}`;
 
@@ -139,6 +199,7 @@ export function EraDetailDrawer({
 
             {/* 3. Notable games (3–5) with played_on + signals chips */}
             <motion.div
+              ref={standoutsRef}
               variants={sectionVariants}
               initial="hidden"
               animate="show"
@@ -202,12 +263,57 @@ export function EraDetailDrawer({
                 })}
               </ul>
               {notableGames.length === 0 && (
-                <p className="text-sm text-white/50">No games in this era in your library yet.</p>
+                <p className="text-sm text-white/50">No standouts yet</p>
+              )}
+            </motion.div>
+
+            {/* 3.5. Played on in this era */}
+            <motion.div
+              ref={playedOnRef}
+              className="pb-2"
+              variants={sectionVariants}
+              initial="hidden"
+              animate="show"
+              custom={2.5}
+            >
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-white/60 mb-2">
+                Played on in this era
+              </h3>
+
+              {!eraPlayedOn?.top_device ? (
+                <p className="text-sm text-white/60">
+                  No played-on signals yet for this era.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                    Most: {eraPlayedOn.top_device.display_name}
+                    {eraPlayedOn.top_device.source === "auto" ? " (Auto)" : ""}
+                    {eraPlayedOn.top_device.releases != null ? ` · ${eraPlayedOn.top_device.releases}` : ""}
+                  </span>
+
+                  {eraPlayedOn.top_devices?.length ? (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      Also:{" "}
+                      {eraPlayedOn.top_devices
+                        .slice(1, 3)
+                        .map((d) => d.display_name)
+                        .join(", ")}
+                    </span>
+                  ) : null}
+
+                  {typeof eraPlayedOn.handheld_share === "number" && eraPlayedOn.total_releases >= 3 ? (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      Handheld share: {Math.round(eraPlayedOn.handheld_share * 100)}%
+                    </span>
+                  ) : null}
+                </div>
               )}
             </motion.div>
 
             {/* 4. Era-scoped archetype snapshot */}
             <motion.div
+              ref={profileRef}
               className="pb-2"
               variants={sectionVariants}
               initial="hidden"
@@ -217,6 +323,41 @@ export function EraDetailDrawer({
               <h3 className="text-xs font-semibold uppercase tracking-wider text-white/60 mb-2">
                 Your profile in this era
               </h3>
+              {eraProfile ? (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {typeof eraProfile.owned_games === "number" && (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      {eraProfile.owned_games} games
+                    </span>
+                  )}
+                  {typeof eraProfile.owned_releases === "number" && (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      {eraProfile.owned_releases} releases owned
+                    </span>
+                  )}
+                  {typeof eraProfile.share_pct === "number" && (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      {Math.round(eraProfile.share_pct * 100)}% of your library
+                    </span>
+                  )}
+                  {eraProfile.top_platforms?.length ? (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      Platforms: {eraProfile.top_platforms.slice(0, 2).join(", ")}
+                    </span>
+                  ) : null}
+                  {eraProfile.most_played_on?.name ? (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      Most played on: {eraProfile.most_played_on.name}
+                      {eraProfile.most_played_on.source === "auto" ? " (Auto)" : ""}
+                    </span>
+                  ) : null}
+                  {eraProfile.most_played_on?.also?.length ? (
+                    <span className="text-xs rounded-full border border-white/10 bg-white/5 px-2 py-1 text-white/80">
+                      Also: {eraProfile.most_played_on.also.join(", ")}
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2.5 flex items-start gap-2">
                 {archTheme ? (
                   <span className={["shrink-0 text-white/70", eraTheme.iconColor].join(" ")} aria-hidden>
@@ -224,7 +365,9 @@ export function EraDetailDrawer({
                     <span className={["inline-block w-2 h-2 rounded-full", eraTheme.dot].join(" ")} />
                   </span>
                 ) : null}
-                <p className="text-sm text-white/80">{archetypeSnapshot}</p>
+                <p className="text-sm text-white/80">
+                  {archetypeSnapshot?.trim() ? archetypeSnapshot : "We're still learning your vibe in this era."}
+                </p>
               </div>
             </motion.div>
           </div>

@@ -54,8 +54,8 @@ export default function ShareWithTimeline({ shareId }: { shareId: string }) {
     );
   }
 
-  const timeline = data.timeline;
-  const eras = timeline?.eras ?? [];
+  const t = data?.timeline ?? data;
+  const eras = (t as { eras?: EraTimelineItem[] })?.eras ?? [];
 
   return (
     <div className="min-h-screen bg-black text-white">

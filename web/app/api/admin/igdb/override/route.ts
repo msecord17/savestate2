@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { igdbFetchGameById, normalizeCanonicalTitle } from "@/lib/igdb/server";
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 /**
  * POST: insert (or upsert) an IGDB override and optionally remap the affected release's game.
@@ -9,6 +10,9 @@ import { igdbFetchGameById, normalizeCanonicalTitle } from "@/lib/igdb/server";
  */
 export async function POST(req: Request) {
   try {
+    const gate = await requireAdmin();
+    if (!gate.ok) return gate.res;
+
     const body = await req.json().catch(() => ({}));
     const platform_key = body?.platform_key ?? body?.platformKey;
     const external_id = body?.external_id ?? body?.externalId;
@@ -31,10 +35,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const admin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
+    const admin = adminClient();
 
     const now = new Date().toISOString();
     const { data: overrideRow, error: upsertErr } = await admin

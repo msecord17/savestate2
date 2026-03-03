@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireAdmin } from "@/lib/admin/requireAdmin";
+import { adminClient } from "@/lib/supabase/admin-client";
 
 export async function GET() {
-  const admin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  const gate = await requireAdmin();
+  if (!gate.ok) return gate.res;
+
+  const admin = adminClient();
 
   const { data, error } = await admin.from("v_spine_health").select("*").single();
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });

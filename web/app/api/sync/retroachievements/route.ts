@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseRouteClient } from "../../../../lib/supabase/route-client";
+import { supabaseServer } from "@/lib/supabase/server";
+import { recordSyncEnd, recordSyncStart } from "@/lib/sync/record-run";
 import { recomputeArchetypesForUser } from "@/lib/insights/recompute";
 
 type RARecentGame = {
@@ -85,6 +87,8 @@ async function getRecentGames(opts: { username: string; apiKey: string; max: num
 }
 
 export async function POST() {
+  let runId: string | null = null;
+  const start = Date.now();
   try {
     const supabase = await supabaseRouteClient();
     const { data: userRes, error: userErr } = await supabase.auth.getUser();
@@ -93,24 +97,37 @@ export async function POST() {
       return NextResponse.json({ error: "Not logged in" }, { status: 401 });
     }
     const user = userRes.user;
+    runId = await recordSyncStart(supabaseServer, user.id, "ra");
+    const endRun = async (
+      status: "ok" | "error",
+      opts?: { errorMessage?: string; resultJson?: unknown }
+    ) => {
+      await recordSyncEnd(supabaseServer, runId, status, {
+        durationMs: Date.now() - start,
+        errorMessage: opts?.errorMessage ?? undefined,
+        resultJson: opts?.resultJson ?? undefined,
+      });
+    };
 
-    // Load RA creds from profiles
+    // Load RA creds + default hardware from profiles
     const { data: profile, error: pErr } = await supabase
       .from("profiles")
-      .select("ra_username, ra_api_key")
+      .select("ra_username, ra_api_key, default_ra_hardware_id")
       .eq("user_id", user.id)
       .maybeSingle();
 
-    if (pErr) return NextResponse.json({ error: pErr.message }, { status: 500 });
+    if (pErr) {
+      await endRun("error", { errorMessage: pErr.message, resultJson: { error: pErr.message, detail: pErr.message } });
+      return NextResponse.json({ error: pErr.message }, { status: 500 });
+    }
 
     const raUsername = String(profile?.ra_username ?? "").trim();
     const raApiKey = String(profile?.ra_api_key ?? "").trim();
 
     if (!raUsername || !raApiKey) {
-      return NextResponse.json(
-        { error: "RetroAchievements not connected (missing ra_username / ra_api_key in profiles)" },
-        { status: 400 }
-      );
+      const errMsg = "RetroAchievements not connected (missing ra_username / ra_api_key in profiles)";
+      await endRun("error", { errorMessage: errMsg, resultJson: { error: errMsg, detail: errMsg } });
+      return NextResponse.json({ error: errMsg }, { status: 400 });
     }
 
     const recent = await getRecentGames({ username: raUsername, apiKey: raApiKey, max: 200 });
@@ -127,11 +144,13 @@ export async function POST() {
         })
         .eq("user_id", user.id);
 
-      return NextResponse.json({
+      const payload = {
         ok: true,
         imported: 0,
         note: "No RA games returned (new account / API mismatch / privacy).",
-      });
+      };
+      await endRun("ok", { resultJson: payload });
+      return NextResponse.json(payload);
     }
 
     // Normalize for your score route fields
@@ -175,7 +194,29 @@ export async function POST() {
       .upsert(rows, { onConflict: "user_id,ra_game_id" });
 
     if (upErr) {
+      await endRun("error", { errorMessage: upErr.message, resultJson: { error: upErr.message, detail: upErr.message } });
       return NextResponse.json({ error: upErr.message }, { status: 500 });
+    }
+
+    // Auto-default played-on for each mapped release (idempotent; skips if manual/RA primary exists)
+    const defaultHardwareId = profile?.default_ra_hardware_id ?? null;
+    if (defaultHardwareId) {
+      const raGameIds = [...new Set(rows.map((r) => String(r.ra_game_id)))];
+      const { data: mappings } = await supabase
+        .from("release_external_ids")
+        .select("release_id, external_id")
+        .eq("source", "ra")
+        .in("external_id", raGameIds);
+
+      for (const m of mappings ?? []) {
+        const { error: rpcErr } = await supabase.rpc("ensure_played_on_primary", {
+          p_user_id: user.id,
+          p_release_id: m.release_id,
+          p_hardware_id: defaultHardwareId,
+          p_source: "ra_default",
+        });
+        if (rpcErr) console.warn(`ensure_played_on_primary(${m.release_id}):`, rpcErr.message);
+      }
     }
 
     await supabase
@@ -193,12 +234,20 @@ export async function POST() {
       // Non-fatal: sync succeeded; archetype snapshot will refresh on next GET or recompute
     }
 
-    return NextResponse.json({
+    const payload = {
       ok: true,
       imported: rows.length,
       username: raUsername,
-    });
+    };
+    await endRun("ok", { resultJson: payload });
+    return NextResponse.json(payload);
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "RA sync failed" }, { status: 500 });
+    const errMsg = e?.message ?? "RA sync failed";
+    await recordSyncEnd(supabaseServer, runId, "error", {
+      durationMs: Date.now() - start,
+      errorMessage: errMsg,
+      resultJson: { error: errMsg, detail: e?.stack ?? errMsg },
+    });
+    return NextResponse.json({ error: errMsg }, { status: 500 });
   }
 }

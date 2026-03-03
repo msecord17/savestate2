@@ -1,77 +1,46 @@
 /**
  * Origin-era bucket from game origin year (games.first_release_year or releases.release_date fallback).
- * Numbered generations with Gen 5 split (5a = 32-bit dawn, 5b = 64-bit wave).
- * First-match order matches SQL; used for timeline cards, standouts, dominance.
+ * Non-overlapping generation buckets. Used for timeline cards, standouts, dominance.
  */
 export function originBucketFromYear(y: number | null | undefined): string {
   if (y == null || !Number.isFinite(y)) return "unknown";
   const year = Number(y);
   if (year >= 1972 && year <= 1977) return "gen1_1972_1977";
-  if (year >= 1976 && year <= 1984) return "gen2_1976_1984";
-  if (year >= 1983 && year <= 1992) return "gen3_1983_1992";
-  if (year >= 1987 && year <= 1992) return "gen4_1987_1996";
-  if (year >= 1993 && year <= 1996) return "gen5a_1993_1996";
-  if (year >= 1996 && year <= 2001) return "gen5b_1996_2001";
-  if (year >= 1998 && year <= 2005) return "gen6_1998_2005";
-  if (year >= 2005 && year <= 2012) return "gen7_2005_2012";
+  if (year >= 1978 && year <= 1982) return "gen2_1978_1982";
+  if (year >= 1983 && year <= 1989) return "gen3_1983_1989";
+  if (year >= 1990 && year <= 1995) return "gen4_1990_1995";
+  if (year >= 1996 && year <= 1999) return "gen5_1996_1999";
+  if (year >= 2000 && year <= 2005) return "gen6_2000_2005";
+  if (year >= 2006 && year <= 2012) return "gen7_2006_2012";
   if (year >= 2013 && year <= 2019) return "gen8_2013_2019";
   if (year >= 2020) return "gen9_2020_plus";
   return "unknown";
 }
 
-/** Chronological order of origin-era keys (oldest first). */
-export const ORIGIN_ORDER: string[] = [
-  "gen1_1972_1977",
-  "gen2_1976_1984",
-  "gen3_1983_1992",
-  "gen4_1987_1996",
-  "gen5a_1993_1996",
-  "gen5b_1996_2001",
-  "gen6_1998_2005",
-  "gen7_2005_2012",
-  "gen8_2013_2019",
-  "gen9_2020_plus",
-  "unknown",
-];
-
-export const ORIGIN_LABELS: Record<string, string> = {
-  gen1_1972_1977: "Gen 1 · First home / Pong",
-  gen2_1976_1984: "Gen 2 · 8-bit cartridge",
-  gen3_1983_1992: "Gen 3 · NES era",
-  gen4_1987_1996: "Gen 4 · 16-bit wars",
-  gen5a_1993_1996: "Gen 5a · 32-bit dawn",
-  gen5b_1996_2001: "Gen 5b · 64-bit wave",
-  gen6_1998_2005: "Gen 6 · PS2 / OG Xbox / GC",
-  gen7_2005_2012: "Gen 7 · HD era",
-  gen8_2013_2019: "Gen 8 · PS4 / Xbox One / Switch",
-  gen9_2020_plus: "Gen 9 · PS5 / Series / modern",
-  unknown: "Unknown",
+export const ORIGIN_BUCKET_META: Record<
+  string,
+  { title: string; sub: string; order: number }
+> = {
+  gen1_1972_1977: { title: "Gen 1", sub: "Odyssey • Pong clones", order: 1 },
+  gen2_1978_1982: { title: "Gen 2", sub: "Atari 2600 • Intellivision", order: 2 },
+  gen3_1983_1989: { title: "Gen 3", sub: "NES • Master System • Game Boy", order: 3 },
+  gen4_1990_1995: { title: "Gen 4", sub: "SNES • Genesis • TG-16", order: 4 },
+  gen5_1996_1999: { title: "Gen 5", sub: "PlayStation • N64 • Saturn", order: 5 },
+  gen6_2000_2005: { title: "Gen 6", sub: "PS2 • GameCube • Xbox • Dreamcast", order: 6 },
+  gen7_2006_2012: { title: "Gen 7", sub: "Xbox 360 • PS3 • Wii", order: 7 },
+  gen8_2013_2019: { title: "Gen 8", sub: "PS4 • Xbox One • Switch", order: 8 },
+  gen9_2020_plus: { title: "Gen 9", sub: "PS5 • Series X|S", order: 9 },
+  unknown: { title: "Unknown", sub: "Missing release year", order: 999 },
 };
 
-export const ORIGIN_YEARS: Record<string, string> = {
-  gen1_1972_1977: "1972–1977",
-  gen2_1976_1984: "1976–1984",
-  gen3_1983_1992: "1983–1992",
-  gen4_1987_1996: "1987–1992",
-  gen5a_1993_1996: "1993–1996",
-  gen5b_1996_2001: "1996–2001",
-  gen6_1998_2005: "1998–2005",
-  gen7_2005_2012: "2005–2012",
-  gen8_2013_2019: "2013–2019",
-  gen9_2020_plus: "2020+",
-  unknown: "—",
-};
+export const ORIGIN_BUCKET_ORDER = Object.entries(ORIGIN_BUCKET_META)
+  .sort((a, b) => a[1].order - b[1].order)
+  .map(([k]) => k);
 
-/** Legacy: era bucket from first_release_year (old mapping). Prefer originBucketFromYear for timeline. */
+/** @deprecated Use ORIGIN_BUCKET_ORDER for timeline. */
+export const ORIGIN_ORDER = ORIGIN_BUCKET_ORDER;
+
+/** Legacy: era bucket from first_release_year. Prefer originBucketFromYear for timeline. */
 export function eraBucketFromYear(y: number | null | undefined): string {
   return originBucketFromYear(y);
 }
-
-/** @deprecated Use ORIGIN_ORDER for timeline. */
-export const ERA_ORDER: string[] = ORIGIN_ORDER;
-
-/** @deprecated Use ORIGIN_LABELS for timeline. */
-export const ERA_LABELS: Record<string, string> = ORIGIN_LABELS;
-
-/** @deprecated Use ORIGIN_YEARS for timeline. */
-export const ERA_YEARS: Record<string, string> = ORIGIN_YEARS;

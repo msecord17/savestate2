@@ -15,7 +15,7 @@ export async function GET(req: Request) {
     response_type: "code",
     redirect_uri: redirectUri,
     response_mode: "query",
-    scope: "XboxLive.signin offline_access",
+    scope: "xboxlive.signin xboxlive.offline_access",
     state: "savestate",
   });
 

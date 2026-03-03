@@ -248,6 +248,24 @@ export async function GET(req: Request) {
     console.warn("RA cache upsert failed:", upErr.message);
   }
 
+  // 7) Auto-default played-on when user has default_ra_hardware_id (RA hydration)
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("default_ra_hardware_id")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  const defaultHardwareId = profile?.default_ra_hardware_id ?? null;
+  if (defaultHardwareId) {
+    const { error: rpcErr } = await supabase.rpc("ensure_played_on_primary", {
+      p_user_id: user.id,
+      p_release_id: releaseId,
+      p_hardware_id: defaultHardwareId,
+      p_source: "ra_default",
+    });
+    if (rpcErr) console.warn("ensure_played_on_primary failed:", rpcErr.message);
+  }
+
   return NextResponse.json({
     ok: true,
     cached: false,
