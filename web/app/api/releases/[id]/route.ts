@@ -1038,7 +1038,7 @@ export async function GET(
             }
           }
           if (!resolved) {
-            const escaped = title.replace(/[%_]/g, (c) => `\\${c}`);
+            const escaped = title.replace(/[%_]/g, (c: string) => `\\${c}`);
             const { data: rel2 } = await supabaseServer
               .from("releases")
               .select("id, cover_url, games(cover_url)")
@@ -1072,7 +1072,7 @@ export async function GET(
               }
             }
             if (!gm?.id) {
-              const esc = title.replace(/[%_]/g, (c) => `\\${c}`);
+              const esc = title.replace(/[%_]/g, (c: string) => `\\${c}`);
               const { data: gm3 } = await supabaseServer
                 .from("games")
                 .select("id")
